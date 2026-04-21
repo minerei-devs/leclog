@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum CaptureSource {
     Microphone,
     SystemAudio,
+    ImportedMedia,
 }
 
 impl CaptureSource {
@@ -12,6 +13,7 @@ impl CaptureSource {
         match value.unwrap_or("microphone") {
             "microphone" => Ok(Self::Microphone),
             "systemAudio" => Ok(Self::SystemAudio),
+            "importedMedia" => Ok(Self::ImportedMedia),
             other => Err(format!("Unsupported capture source: {other}")),
         }
     }
@@ -38,6 +40,16 @@ impl SessionStatus {
             _ => Err(format!("Unsupported session status: {value}")),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptPhase {
+    Idle,
+    Live,
+    Processing,
+    Ready,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,9 +87,19 @@ pub struct LectureSession {
     #[serde(default)]
     pub processed_transcript_path: Option<String>,
     #[serde(default)]
+    pub polished_transcript_path: Option<String>,
+    #[serde(default)]
+    pub polished_transcript_text: Option<String>,
+    #[serde(default)]
     pub live_preview_audio_path: Option<String>,
     #[serde(default)]
     pub live_preview_sample_rate: Option<u32>,
+    #[serde(default = "default_transcript_phase")]
+    pub transcript_phase: TranscriptPhase,
+    #[serde(default)]
+    pub transcript_error: Option<String>,
+    #[serde(default)]
+    pub audio_level: Option<f32>,
     #[serde(default)]
     pub last_resumed_at: Option<String>,
     #[serde(default)]
@@ -86,4 +108,18 @@ pub struct LectureSession {
 
 fn default_capture_source() -> CaptureSource {
     CaptureSource::Microphone
+}
+
+fn default_transcript_phase() -> TranscriptPhase {
+    TranscriptPhase::Idle
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionModelInfo {
+    pub id: String,
+    pub label: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub recommended: bool,
 }

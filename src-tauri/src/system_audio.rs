@@ -5,6 +5,10 @@ use std::sync::mpsc;
 use crate::models::{CaptureSource, LectureSession};
 #[cfg(target_os = "macos")]
 use crate::storage;
+#[cfg(target_os = "macos")]
+use crate::state::AudioMeterState;
+#[cfg(target_os = "macos")]
+use tauri::{AppHandle, Manager};
 
 #[cfg(target_os = "macos")]
 use screencapturekit::{
@@ -46,7 +50,10 @@ pub struct SystemAudioCapture;
 
 #[cfg(target_os = "macos")]
 impl SystemAudioCapture {
-    pub async fn start(session: &LectureSession) -> Result<StartedSystemAudioCapture, String> {
+    pub async fn start(
+        app: &AppHandle,
+        session: &LectureSession,
+    ) -> Result<StartedSystemAudioCapture, String> {
         if session.capture_source != CaptureSource::SystemAudio {
             return Err(String::from(
                 "System audio capture can only be started for system-audio sessions.",
@@ -107,6 +114,8 @@ impl SystemAudioCapture {
 
         let preview_path = session.live_preview_audio_path.clone();
         let preview_sample_rate = session.live_preview_sample_rate.unwrap_or(48_000);
+        let app_handle = app.clone();
+        let meter_session_id = session.id.clone();
 
         let mut stream = SCStream::new(&filter, &stream_config);
         if let Some(preview_path) = preview_path {
@@ -119,6 +128,9 @@ impl SystemAudioCapture {
                     let Some(chunk) = sample_buffer_to_pcm16_mono(&sample) else {
                         return;
                     };
+                    let _ = app_handle
+                        .state::<AudioMeterState>()
+                        .set(&meter_session_id, calculate_pcm16_level(&chunk));
                     let _ = storage::append_live_preview_chunk_to_path(
                         Path::new(&preview_path),
                         preview_sample_rate,
@@ -308,4 +320,25 @@ fn sample_buffer_to_pcm16_mono(sample: &CMSampleBuffer) -> Option<Vec<u8>> {
 fn float_to_i16_sample(sample: f32) -> i16 {
     let scaled = (sample * i16::MAX as f32).round();
     scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+#[cfg(target_os = "macos")]
+fn calculate_pcm16_level(chunk: &[u8]) -> f32 {
+    if chunk.len() < 2 {
+        return 0.0;
+    }
+
+    let mut sum = 0.0f32;
+    let mut count = 0usize;
+    for bytes in chunk.chunks_exact(2) {
+        let sample = i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / i16::MAX as f32;
+        sum += sample * sample;
+        count += 1;
+    }
+
+    if count == 0 {
+        return 0.0;
+    }
+
+    (sum / count as f32).sqrt().clamp(0.0, 1.0)
 }

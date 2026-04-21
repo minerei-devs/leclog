@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useRecentState } from "../hooks/useRecentState";
+import { useSessionPolling } from "../hooks/useSessionPolling";
 import { getErrorMessage } from "../lib/errors";
 import { formatDate, formatDuration } from "../lib/format";
-import { getSession } from "../lib/tauri";
+import { getCaptureSourceLabel } from "../lib/session";
+import { getSession, polishSessionTranscript } from "../lib/tauri";
 import type { LectureSession } from "../types/session";
+import { PanelList } from "./PanelList";
 import { SessionArtifacts } from "./SessionArtifacts";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptPanel } from "./TranscriptPanel";
@@ -14,6 +17,7 @@ export function SessionDetailPage() {
   const { updateRecentState } = useRecentState();
   const [session, setSession] = useState<LectureSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isPolishing, setIsPolishing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -54,6 +58,19 @@ export function SessionDetailPage() {
     };
   }, [sessionId, updateRecentState]);
 
+  useSessionPolling({
+    sessionId,
+    enabled: Boolean(
+      session &&
+        (session.status === "processing" ||
+          session.transcriptPhase === "processing" ||
+          session.transcriptPhase === "live"),
+    ),
+    intervalMs: 1_000,
+    onSession: setSession,
+    onError: setError,
+  });
+
   if (isLoading) {
     return <div className="empty-state">Loading session detail...</div>;
   }
@@ -69,6 +86,24 @@ export function SessionDetailPage() {
     );
   }
 
+  async function handlePolishTranscript() {
+    if (!session) {
+      return;
+    }
+
+    setError(null);
+    setIsPolishing(true);
+
+    try {
+      const updated = await polishSessionTranscript(session.id);
+      setSession(updated);
+    } catch (reason) {
+      setError(getErrorMessage(reason, "Failed to polish the transcript."));
+    } finally {
+      setIsPolishing(false);
+    }
+  }
+
   return (
     <div className="page-grid recording-layout">
       <section className="panel">
@@ -80,30 +115,37 @@ export function SessionDetailPage() {
           <StatusBadge status={session.status} />
         </div>
 
-        <dl className="summary-grid">
-          <div>
-            <dt>Created</dt>
-            <dd>{formatDate(session.createdAt)}</dd>
-          </div>
-          <div>
-            <dt>Updated</dt>
-            <dd>{formatDate(session.updatedAt)}</dd>
-          </div>
-          <div>
-            <dt>Duration</dt>
-            <dd>{formatDuration(session.durationMs)}</dd>
-          </div>
-          <div>
-            <dt>Source</dt>
-            <dd>{session.captureSource === "systemAudio" ? "System audio" : "Microphone"}</dd>
-          </div>
-        </dl>
-
-        {session.captureTargetLabel ? (
-          <p className="helper-text">Capture target: {session.captureTargetLabel}</p>
-        ) : null}
+        <PanelList
+          rows={[
+            {
+              label: "Created",
+              value: formatDate(session.createdAt),
+            },
+            {
+              label: "Updated",
+              value: formatDate(session.updatedAt),
+            },
+            {
+              label: "Duration",
+              value: formatDuration(session.durationMs),
+            },
+            {
+              label: "Source",
+              value: getCaptureSourceLabel(session.captureSource),
+            },
+            {
+              label: "Transcript status",
+              value: session.transcriptPhase,
+            },
+            ...(session.captureTargetLabel
+              ? [{ label: "Capture target", value: session.captureTargetLabel }]
+              : []),
+          ]}
+        />
 
         <SessionArtifacts session={session} />
+
+        {session.transcriptError ? <p className="error-banner">{session.transcriptError}</p> : null}
 
         <Link className="ghost-button" to="/">
           Back to sessions
@@ -112,7 +154,11 @@ export function SessionDetailPage() {
 
       <TranscriptPanel
         segments={session.segments}
+        polishedTranscriptText={session.polishedTranscriptText}
         emptyMessage="No transcript segments were saved for this session."
+        canPolish={session.segments.length > 0 && session.transcriptPhase === "ready"}
+        isPolishing={isPolishing}
+        onPolish={() => void handlePolishTranscript()}
       />
     </div>
   );

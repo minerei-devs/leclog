@@ -1,6 +1,8 @@
+import { FolderSearch } from "lucide-react";
 import { useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { LectureSession } from "../types/session";
+import { PanelList } from "./PanelList";
 
 interface SessionArtifactsProps {
   session: LectureSession;
@@ -13,30 +15,42 @@ export function SessionArtifacts({ session }: SessionArtifactsProps) {
     {
       label: "Session folder",
       value: session.sessionDir,
+      revealable: true,
     },
     {
       label: "Active capture file",
       value: session.activeAudioFilePath,
+      revealable: true,
     },
     {
       label: "Capture MIME type",
       value: session.audioMimeType,
+      revealable: false,
     },
     {
       label: "Capture target",
       value: session.captureTargetLabel,
+      revealable: false,
     },
     {
       label: "Normalized audio",
       value: session.normalizedAudioPath,
+      revealable: true,
     },
     {
       label: "Live preview audio",
       value: session.livePreviewAudioPath,
+      revealable: true,
     },
     {
       label: "Processed transcript",
       value: session.processedTranscriptPath,
+      revealable: true,
+    },
+    {
+      label: "Polished transcript",
+      value: session.polishedTranscriptPath,
+      revealable: true,
     },
   ].filter((row) => row.value);
 
@@ -64,43 +78,40 @@ export function SessionArtifacts({ session }: SessionArtifactsProps) {
         <p>Stored under the app local data directory.</p>
       </div>
 
-      <dl className="artifact-list">
-        {rows.map((row) => (
-          <div key={row.label}>
-            <dt className="artifact-header">
-              <span>{row.label}</span>
+      <PanelList
+        rows={[
+          ...rows.map((row) => ({
+            label: row.label,
+            value: row.value as string,
+            action: row.revealable ? (
               <button
-                className="inline-button"
+                className="icon-button"
                 type="button"
+                title="Show in Finder"
+                aria-label={`Show ${row.label} in Finder`}
                 onClick={() => void handleReveal(row.value as string)}
               >
-                Show in Finder
+                <FolderSearch size={15} />
               </button>
-            </dt>
-            <dd>{row.value}</dd>
-          </div>
-        ))}
-
-        {session.audioFilePaths.length > 0 ? (
-          <div>
-            <dt>Capture files</dt>
-            <dd className="artifact-values">
-              {session.audioFilePaths.map((path) => (
-                <span key={path} className="artifact-path-row">
-                  <span>{path}</span>
-                  <button
-                    className="inline-button"
-                    type="button"
-                    onClick={() => void handleReveal(path)}
-                  >
-                    Show in Finder
-                  </button>
-                </span>
-              ))}
-            </dd>
-          </div>
-        ) : null}
-      </dl>
+            ) : undefined,
+          })),
+          ...session.audioFilePaths.map((path, index) => ({
+            label: `Capture file ${index + 1}`,
+            value: path,
+            action: (
+              <button
+                className="icon-button"
+                type="button"
+                title="Show in Finder"
+                aria-label={`Show capture file ${index + 1} in Finder`}
+                onClick={() => void handleReveal(path)}
+              >
+                <FolderSearch size={15} />
+              </button>
+            ),
+          })),
+        ]}
+      />
 
       {error ? <p className="error-banner">{error}</p> : null}
     </section>

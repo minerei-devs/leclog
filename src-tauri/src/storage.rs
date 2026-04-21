@@ -12,7 +12,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-use crate::models::{LectureSession, SessionStatus, TranscriptSegment};
+use crate::models::{LectureSession, SessionStatus, TranscriptSegment, TranscriptionModelInfo};
 
 const SESSIONS_FILE_NAME: &str = "sessions.json";
 const SESSIONS_DIR_NAME: &str = "sessions";
@@ -20,6 +20,7 @@ const SESSION_METADATA_FILE_NAME: &str = "session.json";
 const CONCAT_INPUTS_FILE_NAME: &str = "concat-inputs.txt";
 const NORMALIZED_AUDIO_FILE_NAME: &str = "normalized.wav";
 const PROCESSED_TRANSCRIPT_FILE_NAME: &str = "transcript.txt";
+const POLISHED_TRANSCRIPT_FILE_NAME: &str = "transcript-polished.txt";
 const TRANSCRIPT_JSON_FILE_NAME: &str = "transcript.json";
 const LIVE_PREVIEW_AUDIO_FILE_NAME: &str = "live-preview.wav";
 const LIVE_TRANSCRIPT_JSON_FILE_NAME: &str = "live-transcript.json";
@@ -74,6 +75,12 @@ fn processed_transcript_path(app: &AppHandle, session_id: &str) -> Result<PathBu
         .join(PROCESSED_TRANSCRIPT_FILE_NAME))
 }
 
+fn polished_transcript_path(app: &AppHandle, session_id: &str) -> Result<PathBuf> {
+    Ok(session_dir_path(app, session_id)?
+        .join("processed")
+        .join(POLISHED_TRANSCRIPT_FILE_NAME))
+}
+
 fn live_preview_audio_path(app: &AppHandle, session_id: &str) -> Result<PathBuf> {
     Ok(session_dir_path(app, session_id)?
         .join("processed")
@@ -108,6 +115,7 @@ pub fn ensure_session_paths(app: &AppHandle, session: &mut LectureSession) -> Re
     let session_dir = session_dir_path(app, &session.id)?;
     let normalized_audio = normalized_audio_path(app, &session.id)?;
     let processed_path = processed_transcript_path(app, &session.id)?;
+    let polished_path = polished_transcript_path(app, &session.id)?;
     let live_preview_audio = live_preview_audio_path(app, &session.id)?;
 
     fs::create_dir_all(session_dir.join("audio"))
@@ -126,6 +134,12 @@ pub fn ensure_session_paths(app: &AppHandle, session: &mut LectureSession) -> Re
     let processed_value = processed_path.display().to_string();
     if session.processed_transcript_path.as_deref() != Some(processed_value.as_str()) {
         session.processed_transcript_path = Some(processed_value);
+        changed = true;
+    }
+
+    let polished_value = polished_path.display().to_string();
+    if session.polished_transcript_path.as_deref() != Some(polished_value.as_str()) {
+        session.polished_transcript_path = Some(polished_value);
         changed = true;
     }
 
@@ -239,7 +253,7 @@ fn resolve_whisper_cli_path(app: &AppHandle) -> PathBuf {
     PathBuf::from("whisper-cli")
 }
 
-fn resolve_whisper_model_path(app: &AppHandle) -> Option<PathBuf> {
+fn resolve_whisper_model_path(app: &AppHandle, preferred_model_id: Option<&str>) -> Option<PathBuf> {
     if let Ok(path) = env::var("LECLOG_WHISPER_MODEL_PATH") {
         let candidate = PathBuf::from(path);
         if candidate.exists() {
@@ -247,6 +261,31 @@ fn resolve_whisper_model_path(app: &AppHandle) -> Option<PathBuf> {
         }
     }
 
+    if let Some(preferred_model_id) = preferred_model_id {
+        let preferred_model_id = preferred_model_id.trim();
+        if !preferred_model_id.is_empty() {
+            for dir in model_search_dirs(app) {
+                let candidate = dir.join(preferred_model_id);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    for dir in model_search_dirs(app) {
+        for file_name in DEFAULT_WHISPER_MODEL_FILE_NAMES {
+            let candidate = dir.join(file_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn model_search_dirs(app: &AppHandle) -> Vec<PathBuf> {
     let mut search_dirs = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models")];
 
     if let Ok(data_dir) = app_data_dir(app) {
@@ -258,16 +297,7 @@ fn resolve_whisper_model_path(app: &AppHandle) -> Option<PathBuf> {
         search_dirs.push(resource_dir);
     }
 
-    for dir in search_dirs {
-        for file_name in DEFAULT_WHISPER_MODEL_FILE_NAMES {
-            let candidate = dir.join(file_name);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-
-    None
+    search_dirs
 }
 
 fn run_ffmpeg(app: &AppHandle, args: &[&str]) -> Result<()> {
@@ -333,6 +363,7 @@ fn parse_transcript_segments_with_finality(
             .and_then(Value::as_str)
             .map(str::trim)
             .unwrap_or_default();
+        let text = normalize_transcript_text(text);
         if text.is_empty() {
             continue;
         }
@@ -348,7 +379,7 @@ fn parse_transcript_segments_with_finality(
             id: Uuid::new_v4().to_string(),
             start_ms,
             end_ms: capped_end_ms,
-            text: text.to_string(),
+            text,
             is_final,
         });
     }
@@ -357,7 +388,351 @@ fn parse_transcript_segments_with_finality(
         anyhow::bail!("whisper.cpp completed, but no transcript text was produced.");
     }
 
-    Ok(segments)
+    Ok(rewrite_transcript_segments(segments, is_final))
+}
+
+fn squeeze_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_punctuation_spacing(value: &str) -> String {
+    value
+        .replace(" 。", "。")
+        .replace(" 、", "、")
+        .replace(" ？", "？")
+        .replace(" ！", "！")
+        .replace(" .", ".")
+        .replace(" ,", ",")
+        .replace(" ?", "?")
+        .replace(" !", "!")
+}
+
+fn collapse_repeated_punctuation(value: &str) -> String {
+    let mut normalized = value.to_string();
+    for (from, to) in [
+        ("。。", "。"),
+        ("、、", "、"),
+        ("？？", "？"),
+        ("！！", "！"),
+        ("..", "."),
+        (",,", ","),
+        ("??", "?"),
+        ("!!", "!"),
+    ] {
+        while normalized.contains(from) {
+            normalized = normalized.replace(from, to);
+        }
+    }
+    normalized
+}
+
+fn has_terminal_punctuation(value: &str) -> bool {
+    let trimmed = value.trim_end();
+    trimmed.ends_with('。')
+        || trimmed.ends_with('！')
+        || trimmed.ends_with('？')
+        || trimmed.ends_with('.')
+        || trimmed.ends_with('!')
+        || trimmed.ends_with('?')
+}
+
+fn looks_like_question(value: &str) -> bool {
+    let trimmed = value.trim_end();
+    trimmed.ends_with('か')
+        || trimmed.ends_with("ですか")
+        || trimmed.ends_with("ますか")
+        || trimmed.ends_with("でしょうか")
+}
+
+fn normalize_transcript_text(text: &str) -> String {
+    let mut normalized = collapse_repeated_punctuation(&normalize_punctuation_spacing(
+        &squeeze_whitespace(text),
+    ))
+    .trim()
+    .to_string();
+    if normalized.is_empty() {
+        return normalized;
+    }
+
+    if normalized.ends_with('、') || normalized.ends_with(',') {
+        normalized.pop();
+        normalized = normalized.trim_end().to_string();
+    }
+
+    normalized
+}
+
+fn finalize_sentence_text(text: &str, is_final: bool) -> String {
+    let mut normalized = normalize_transcript_text(text);
+    if normalized.is_empty() {
+        return normalized;
+    }
+
+    if is_final && !has_terminal_punctuation(&normalized) {
+        if looks_like_question(&normalized) {
+            normalized.push('？');
+        } else {
+            normalized.push('。');
+        }
+    }
+
+    normalized
+}
+
+fn merge_transcript_text(left: &str, right: &str) -> String {
+    if left.is_empty() {
+        return right.to_string();
+    }
+
+    if right.is_empty() {
+        return left.to_string();
+    }
+
+    let right_starts_with_punctuation =
+        right.starts_with('、') || right.starts_with('。') || right.starts_with('？') || right.starts_with('！');
+    let needs_space = left
+        .chars()
+        .last()
+        .is_some_and(|value| value.is_ascii_alphanumeric())
+        && right
+            .chars()
+            .next()
+            .is_some_and(|value| value.is_ascii_alphanumeric());
+
+    if right_starts_with_punctuation {
+        format!("{left}{right}")
+    } else if needs_space {
+        format!("{left} {right}")
+    } else {
+        format!("{left}{right}")
+    }
+}
+
+fn is_terminal_punctuation(char: char) -> bool {
+    matches!(char, '。' | '？' | '！' | '.' | '?' | '!')
+}
+
+fn likely_sentence_boundary(text: &str, is_final: bool) -> bool {
+    if has_terminal_punctuation(text) {
+        return true;
+    }
+
+    if !is_final {
+        return false;
+    }
+
+    let trimmed = text.trim_end_matches(['、', ',', ' ']);
+    let char_len = trimmed.chars().count();
+    let common_japanese_endings = [
+        "です",
+        "ます",
+        "でした",
+        "ました",
+        "ません",
+        "ください",
+        "ましょう",
+        "と思います",
+        "になります",
+        "ということです",
+        "なんですね",
+        "ですよね",
+        "ですね",
+        "でしたね",
+        "でしょう",
+        "でしょうか",
+        "ですか",
+        "ますか",
+    ];
+
+    (char_len >= 8 && common_japanese_endings.iter().any(|ending| trimmed.ends_with(ending)))
+        || char_len >= 28
+}
+
+fn split_text_into_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut buffer = String::new();
+
+    for char in text.chars() {
+        buffer.push(char);
+        if is_terminal_punctuation(char) {
+            let sentence = buffer.trim();
+            if !sentence.is_empty() {
+                sentences.push(sentence.to_string());
+            }
+            buffer.clear();
+        }
+    }
+
+    let remainder = buffer.trim();
+    if !remainder.is_empty() {
+        sentences.push(remainder.to_string());
+    }
+
+    sentences
+}
+
+fn split_segment_into_sentences(segment: TranscriptSegment) -> Vec<TranscriptSegment> {
+    let sentences = split_text_into_sentences(&segment.text);
+    if sentences.len() <= 1 {
+        return vec![segment];
+    }
+
+    let sentence_count = sentences.len();
+    let total_chars = sentences
+        .iter()
+        .map(|sentence| sentence.chars().count().max(1))
+        .sum::<usize>()
+        .max(1) as u64;
+    let total_duration = segment.end_ms.saturating_sub(segment.start_ms).max(1);
+
+    let mut cursor = segment.start_ms;
+    let mut consumed_chars = 0u64;
+    let mut rewritten = Vec::new();
+
+    for (index, sentence) in sentences.into_iter().enumerate() {
+        let sentence_chars = sentence.chars().count().max(1) as u64;
+        consumed_chars = consumed_chars.saturating_add(sentence_chars);
+        let end_ms = if index == 0 && sentence_chars == total_chars {
+            segment.end_ms
+        } else if index + 1 == sentence_count {
+            segment.end_ms
+        } else if consumed_chars >= total_chars {
+            segment.end_ms
+        } else {
+            segment.start_ms + total_duration.saturating_mul(consumed_chars) / total_chars
+        }
+        .max(cursor.saturating_add(1))
+        .min(segment.end_ms);
+
+        rewritten.push(TranscriptSegment {
+            id: Uuid::new_v4().to_string(),
+            start_ms: cursor,
+            end_ms,
+            text: sentence,
+            is_final: segment.is_final,
+        });
+
+        cursor = end_ms;
+    }
+
+    if let Some(last) = rewritten.last_mut() {
+        last.end_ms = segment.end_ms.max(last.start_ms.saturating_add(1));
+    }
+
+    rewritten
+}
+
+fn should_insert_space_between_sentences(left: &str, right: &str) -> bool {
+    left.chars()
+        .last()
+        .is_some_and(|value| value.is_ascii_alphanumeric())
+        && right
+            .chars()
+            .next()
+            .is_some_and(|value| value.is_ascii_alphanumeric())
+}
+
+pub fn polish_transcript_text(segments: &[TranscriptSegment]) -> String {
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut current_paragraph = String::new();
+    let mut current_sentence_count = 0usize;
+    let mut last_end_ms: Option<u64> = None;
+    let mut last_text: Option<String> = None;
+
+    for segment in segments {
+        let sentence = finalize_sentence_text(&segment.text, true);
+        if sentence.is_empty() {
+            continue;
+        }
+
+        if last_text.as_deref() == Some(sentence.as_str()) {
+            last_end_ms = Some(segment.end_ms);
+            continue;
+        }
+
+        let gap_ms = last_end_ms
+            .map(|end_ms| segment.start_ms.saturating_sub(end_ms))
+            .unwrap_or(0);
+        let paragraph_char_len = current_paragraph.chars().count();
+        let paragraph_break = !current_paragraph.is_empty()
+            && (gap_ms >= 3200
+                || (current_sentence_count >= 4 && paragraph_char_len >= 70)
+                || (gap_ms >= 1800 && sentence.ends_with('？')));
+
+        if paragraph_break {
+            paragraphs.push(current_paragraph.trim().to_string());
+            current_paragraph.clear();
+            current_sentence_count = 0;
+        }
+
+        if current_paragraph.is_empty() {
+            current_paragraph.push_str(&sentence);
+        } else if should_insert_space_between_sentences(&current_paragraph, &sentence) {
+            current_paragraph.push(' ');
+            current_paragraph.push_str(&sentence);
+        } else {
+            current_paragraph.push_str(&sentence);
+        }
+
+        current_sentence_count += 1;
+        last_end_ms = Some(segment.end_ms);
+        last_text = Some(sentence);
+    }
+
+    if !current_paragraph.trim().is_empty() {
+        paragraphs.push(current_paragraph.trim().to_string());
+    }
+
+    paragraphs.join("\n\n")
+}
+
+fn rewrite_transcript_segments(
+    segments: Vec<TranscriptSegment>,
+    is_final: bool,
+) -> Vec<TranscriptSegment> {
+    let mut rewritten = Vec::new();
+    let mut active: Option<TranscriptSegment> = None;
+
+    for segment in segments {
+        if let Some(current) = active.as_mut() {
+            current.text = merge_transcript_text(&current.text, &segment.text);
+            current.end_ms = segment.end_ms;
+            current.is_final = segment.is_final;
+
+            if likely_sentence_boundary(&current.text, is_final) {
+                let finalized = TranscriptSegment {
+                    id: Uuid::new_v4().to_string(),
+                    start_ms: current.start_ms,
+                    end_ms: current.end_ms,
+                    text: finalize_sentence_text(&current.text, is_final),
+                    is_final: segment.is_final,
+                };
+                rewritten.extend(split_segment_into_sentences(finalized));
+                active = None;
+            }
+            continue;
+        }
+
+        let mut next = segment;
+        next.text = normalize_transcript_text(&next.text);
+        if next.text.is_empty() {
+            continue;
+        }
+
+        if likely_sentence_boundary(&next.text, is_final) {
+            next.text = finalize_sentence_text(&next.text, is_final);
+            rewritten.extend(split_segment_into_sentences(next));
+        } else {
+            active = Some(next);
+        }
+    }
+
+    if let Some(mut remainder) = active {
+        remainder.text = finalize_sentence_text(&remainder.text, is_final);
+        rewritten.extend(split_segment_into_sentences(remainder));
+    }
+
+    rewritten
 }
 
 pub fn start_audio_segment(
@@ -407,6 +782,90 @@ pub fn append_audio_chunk(session: &LectureSession, chunk: &[u8]) -> Result<()> 
 
 pub fn finish_audio_segment(session: &mut LectureSession) {
     session.active_audio_file_path = None;
+}
+
+fn sanitize_file_stem(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || char == '-' || char == '_' {
+                char
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    if sanitized.is_empty() {
+        String::from("imported-media")
+    } else {
+        sanitized
+    }
+}
+
+fn guess_media_mime_type(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "mp3" => Some("audio/mpeg"),
+        "m4a" => Some("audio/mp4"),
+        "wav" => Some("audio/wav"),
+        "aac" => Some("audio/aac"),
+        "ogg" | "oga" => Some("audio/ogg"),
+        "opus" => Some("audio/opus"),
+        "flac" => Some("audio/flac"),
+        "webm" => Some("audio/webm"),
+        "mp4" | "m4v" => Some("video/mp4"),
+        "mov" => Some("video/quicktime"),
+        "mkv" => Some("video/x-matroska"),
+        "avi" => Some("video/x-msvideo"),
+        _ => None,
+    }
+}
+
+pub fn import_media_file(app: &AppHandle, session: &mut LectureSession, source_path: &Path) -> Result<()> {
+    if !source_path.exists() || !source_path.is_file() {
+        anyhow::bail!("The dropped file does not exist: {}", source_path.display());
+    }
+
+    ensure_session_paths(app, session)?;
+
+    let extension = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("media");
+    let stem = source_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("imported-media");
+    let sanitized_stem = sanitize_file_stem(stem);
+    let destination_path = session_dir_path(app, &session.id)?
+        .join("audio")
+        .join(format!("{sanitized_stem}.{}", extension.trim_start_matches('.')));
+
+    ensure_parent_dir(&destination_path)?;
+    fs::copy(source_path, &destination_path).with_context(|| {
+        format!(
+            "Failed to copy the imported media file from {} to {}.",
+            source_path.display(),
+            destination_path.display()
+        )
+    })?;
+
+    session.active_audio_file_path = None;
+    session.audio_file_paths = vec![destination_path.display().to_string()];
+    session.audio_mime_type = guess_media_mime_type(source_path).map(str::to_string);
+    session.capture_target_label = Some(
+        source_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_string(),
+    );
+
+    Ok(())
 }
 
 pub fn rollback_last_audio_segment(session: &mut LectureSession) -> Result<()> {
@@ -490,6 +949,12 @@ pub fn write_processed_transcript(app: &AppHandle, session: &LectureSession) -> 
     }
     output.push('\n');
 
+    if let Some(polished_transcript_text) = &session.polished_transcript_text {
+        output.push_str("## Polished Transcript\n\n");
+        output.push_str(polished_transcript_text.trim());
+        output.push_str("\n\n");
+    }
+
     if session.segments.is_empty() {
         output.push_str("No transcript segments were captured for this session.\n");
     } else {
@@ -505,11 +970,75 @@ pub fn write_processed_transcript(app: &AppHandle, session: &LectureSession) -> 
     Ok(())
 }
 
+pub fn write_polished_transcript(app: &AppHandle, session: &LectureSession) -> Result<()> {
+    let polished_text = session
+        .polished_transcript_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("No polished transcript text is available for this session.")?;
+    let path = if let Some(path) = &session.polished_transcript_path {
+        PathBuf::from(path)
+    } else {
+        polished_transcript_path(app, &session.id)?
+    };
+    ensure_parent_dir(&path)?;
+    fs::write(path, format!("{polished_text}\n"))
+        .context("Failed to write polished transcript artifact.")?;
+    Ok(())
+}
+
+pub fn list_transcription_models(app: &AppHandle) -> Result<Vec<TranscriptionModelInfo>> {
+    let recommended_path = resolve_whisper_model_path(app, None);
+    let mut models = Vec::new();
+
+    for dir in model_search_dirs(app) {
+        if !dir.exists() {
+            continue;
+        }
+
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("Failed to read model directory {}.", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !(file_name.starts_with("ggml-")
+                && (file_name.ends_with(".bin") || file_name.ends_with(".gguf")))
+            {
+                continue;
+            }
+
+            let metadata = entry.metadata()?;
+            models.push(TranscriptionModelInfo {
+                id: file_name.to_string(),
+                label: file_name
+                    .trim_start_matches("ggml-")
+                    .trim_end_matches(".bin")
+                    .trim_end_matches(".gguf")
+                    .replace('-', " "),
+                path: path.display().to_string(),
+                size_bytes: metadata.len(),
+                recommended: recommended_path.as_ref().is_some_and(|value| value == &path),
+            });
+        }
+    }
+
+    models.sort_by(|left, right| right.recommended.cmp(&left.recommended).then(left.id.cmp(&right.id)));
+    Ok(models)
+}
+
 fn transcribe_audio_path(
     app: &AppHandle,
     audio_path: &Path,
     transcript_json_path: &Path,
     is_final: bool,
+    preferred_model_id: Option<&str>,
     language: &str,
     prompt: Option<&str>,
     max_end_ms: Option<u64>,
@@ -517,7 +1046,7 @@ fn transcribe_audio_path(
     if !audio_path.exists() {
         anyhow::bail!("The audio file does not exist: {}", audio_path.display());
     }
-    let model_path = resolve_whisper_model_path(app).context(
+    let model_path = resolve_whisper_model_path(app, preferred_model_id).context(
         "No local Whisper model was found. Set LECLOG_WHISPER_MODEL_PATH or place a ggml model under src-tauri/models or the app local data models directory.",
     )?;
 
@@ -539,6 +1068,7 @@ fn transcribe_audio_path(
         String::from("--output-file"),
         output_base_str,
         String::from("--no-prints"),
+        String::from("--carry-initial-prompt"),
     ];
     if let Some(prompt) = prompt {
         let trimmed_prompt = prompt.trim();
@@ -562,19 +1092,31 @@ fn transcribe_audio_path(
     parse_transcript_segments_with_finality(&raw_transcript, is_final, max_end_ms)
 }
 
-fn resolve_whisper_language() -> String {
-    env::var("LECLOG_WHISPER_LANGUAGE")
-        .ok()
-        .map(|value| value.trim().to_string())
+fn resolve_whisper_language(preferred_language: Option<&str>) -> String {
+    preferred_language
+        .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            env::var("LECLOG_WHISPER_LANGUAGE")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
         .unwrap_or_else(|| String::from("auto"))
 }
 
-fn resolve_whisper_prompt() -> Option<String> {
-    env::var("LECLOG_WHISPER_PROMPT")
-        .ok()
-        .map(|value| value.trim().to_string())
+fn resolve_whisper_prompt(prompt_terms: Option<&str>) -> Option<String> {
+    prompt_terms
+        .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            env::var("LECLOG_WHISPER_PROMPT")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 fn wav_duration_ms(path: &Path, sample_rate: u32) -> Result<u64> {
@@ -597,6 +1139,9 @@ fn wav_duration_ms(path: &Path, sample_rate: u32) -> Result<u64> {
 pub fn transcribe_normalized_audio(
     app: &AppHandle,
     session: &LectureSession,
+    preferred_model_id: Option<&str>,
+    preferred_language: Option<&str>,
+    prompt_terms: Option<&str>,
 ) -> Result<Vec<TranscriptSegment>> {
     let normalized_audio_path = session
         .normalized_audio_path
@@ -604,14 +1149,15 @@ pub fn transcribe_normalized_audio(
         .map(PathBuf::from)
         .context("The session is missing a normalized audio file.")?;
     let transcript_json_path = transcript_json_path(app, &session.id)?;
-    let language = resolve_whisper_language();
-    let prompt = resolve_whisper_prompt();
+    let language = resolve_whisper_language(preferred_language);
+    let prompt = resolve_whisper_prompt(prompt_terms);
 
     transcribe_audio_path(
         app,
         &normalized_audio_path,
         &transcript_json_path,
         true,
+        preferred_model_id,
         &language,
         prompt.as_deref(),
         None,
@@ -621,6 +1167,9 @@ pub fn transcribe_normalized_audio(
 pub fn transcribe_live_preview_audio(
     app: &AppHandle,
     session: &LectureSession,
+    preferred_model_id: Option<&str>,
+    preferred_language: Option<&str>,
+    prompt_terms: Option<&str>,
 ) -> Result<Vec<TranscriptSegment>> {
     let live_preview_audio_path = session
         .live_preview_audio_path
@@ -635,8 +1184,8 @@ pub fn transcribe_live_preview_audio(
         return Ok(Vec::new());
     }
     let transcript_json_path = live_transcript_json_path(app, &session.id)?;
-    let language = resolve_whisper_language();
-    let prompt = resolve_whisper_prompt();
+    let language = resolve_whisper_language(preferred_language);
+    let prompt = resolve_whisper_prompt(prompt_terms);
     let sample_rate = session.live_preview_sample_rate.unwrap_or(16_000);
     let max_end_ms = Some(wav_duration_ms(&live_preview_audio_path, sample_rate)?);
 
@@ -645,6 +1194,7 @@ pub fn transcribe_live_preview_audio(
         &live_preview_audio_path,
         &transcript_json_path,
         false,
+        preferred_model_id,
         &language,
         prompt.as_deref(),
         max_end_ms,
@@ -854,20 +1404,21 @@ pub fn append_live_preview_chunk(session: &LectureSession, chunk: &[u8]) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::parse_transcript_segments_with_finality;
+    use super::{parse_transcript_segments_with_finality, polish_transcript_text};
+    use crate::models::TranscriptSegment;
 
     #[test]
-    fn parses_whisper_cpp_json_segments() {
+    fn rewrites_whisper_cpp_json_into_sentence_segments() {
         let raw = r#"{
           "result": { "language": "ja" },
           "transcription": [
             {
               "offsets": { "from": 0, "to": 8500 },
-              "text": "こんにちは"
+              "text": "今日は授業を始めます"
             },
             {
               "offsets": { "from": 8500, "to": 12000 },
-              "text": "世界"
+              "text": "よろしくお願いします"
             }
           ]
         }"#;
@@ -878,10 +1429,66 @@ mod tests {
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].start_ms, 0);
         assert_eq!(segments[0].end_ms, 8500);
-        assert_eq!(segments[0].text, "こんにちは");
+        assert_eq!(segments[0].text, "今日は授業を始めます。");
         assert_eq!(segments[1].start_ms, 8500);
         assert_eq!(segments[1].end_ms, 12000);
-        assert_eq!(segments[1].text, "世界");
+        assert_eq!(segments[1].text, "よろしくお願いします。");
         assert!(segments.iter().all(|segment| segment.is_final));
+    }
+
+    #[test]
+    fn merges_draft_segments_without_forcing_terminal_punctuation() {
+        let raw = r#"{
+          "result": { "language": "ja" },
+          "transcription": [
+            {
+              "offsets": { "from": 0, "to": 4000 },
+              "text": "次に"
+            },
+            {
+              "offsets": { "from": 4000, "to": 9000 },
+              "text": "分散システムについて"
+            }
+          ]
+        }"#;
+
+        let segments =
+            parse_transcript_segments_with_finality(raw, false, None)
+                .expect("segments should parse");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "次に分散システムについて");
+        assert!(!segments[0].is_final);
+    }
+
+    #[test]
+    fn builds_polished_transcript_paragraphs() {
+        let polished = polish_transcript_text(&[
+            TranscriptSegment {
+                id: String::from("1"),
+                start_ms: 0,
+                end_ms: 1800,
+                text: String::from("今日は授業を始めます。"),
+                is_final: true,
+            },
+            TranscriptSegment {
+                id: String::from("2"),
+                start_ms: 1800,
+                end_ms: 3600,
+                text: String::from("まず前回の復習をします。"),
+                is_final: true,
+            },
+            TranscriptSegment {
+                id: String::from("3"),
+                start_ms: 7600,
+                end_ms: 9200,
+                text: String::from("質問はありますか？"),
+                is_final: true,
+            },
+        ]);
+
+        assert_eq!(
+            polished,
+            "今日は授業を始めます。まず前回の復習をします。\n\n質問はありますか？"
+        );
     }
 }

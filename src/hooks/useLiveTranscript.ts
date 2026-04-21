@@ -1,20 +1,23 @@
 import { useEffect, useRef } from "react";
-import { refreshLiveTranscript } from "../lib/tauri";
-import type { LectureSession } from "../types/session";
+import { queueLiveTranscriptRefresh } from "../lib/tauri";
+import type { LectureSession, TranscriptionSettings } from "../types/session";
 
 interface UseLiveTranscriptOptions {
   session: LectureSession | null;
+  settings: Partial<TranscriptionSettings>;
   onSessionUpdate: (session: LectureSession) => void;
   onError: (message: string) => void;
 }
 
 export function useLiveTranscript({
   session,
+  settings,
   onSessionUpdate,
   onError,
 }: UseLiveTranscriptOptions) {
   const isRefreshingRef = useRef(false);
   const sessionRef = useRef<LectureSession | null>(session);
+  const settingsRef = useRef(settings);
 
   useEffect(() => {
     if (!session || session.status !== "paused" || isRefreshingRef.current) {
@@ -24,7 +27,7 @@ export function useLiveTranscript({
     void (async () => {
       try {
         isRefreshingRef.current = true;
-        const updated = await refreshLiveTranscript(session.id);
+        const updated = await queueLiveTranscriptRefresh(session.id, settingsRef.current);
         onSessionUpdate(updated);
       } catch (error) {
         onError(
@@ -36,11 +39,15 @@ export function useLiveTranscript({
         isRefreshingRef.current = false;
       }
     })();
-  }, [onError, onSessionUpdate, session]);
+  }, [onError, onSessionUpdate, session, settings]);
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   useEffect(() => {
     if (!session || session.status !== "recording") {
@@ -54,7 +61,10 @@ export function useLiveTranscript({
 
       try {
         isRefreshingRef.current = true;
-        const updated = await refreshLiveTranscript(sessionRef.current.id);
+        const updated = await queueLiveTranscriptRefresh(
+          sessionRef.current.id,
+          settingsRef.current,
+        );
         onSessionUpdate(updated);
       } catch (error) {
         onError(
@@ -70,5 +80,5 @@ export function useLiveTranscript({
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [onError, onSessionUpdate, session]);
+  }, [onError, onSessionUpdate, session?.id, session?.status]);
 }

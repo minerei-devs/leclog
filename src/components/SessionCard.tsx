@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { formatDate, formatDuration } from "../lib/format";
+import { getCaptureSourceLabel, getSessionHref } from "../lib/session";
 import type { LectureSession } from "../types/session";
 import { StatusBadge } from "./StatusBadge";
 
@@ -8,8 +9,7 @@ interface SessionCardProps {
 }
 
 export function SessionCard({ session }: SessionCardProps) {
-  const href =
-    session.status === "done" ? `/session/${session.id}` : `/recording/${session.id}`;
+  const href = getSessionHref(session);
 
   return (
     <Link className="session-card" to={href}>
@@ -28,11 +28,13 @@ export function SessionCard({ session }: SessionCardProps) {
         </div>
         <div>
           <dt>Transcript</dt>
-          <dd>{session.segments.length}</dd>
+          <dd>
+            {session.segments.length} · {session.transcriptPhase}
+          </dd>
         </div>
         <div>
           <dt>Source</dt>
-          <dd>{session.captureSource === "systemAudio" ? "System audio" : "Microphone"}</dd>
+          <dd>{getCaptureSourceLabel(session.captureSource)}</dd>
         </div>
       </dl>
     </Link>

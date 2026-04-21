@@ -6,7 +6,7 @@ mod state;
 mod storage;
 mod system_audio;
 
-use state::{SessionState, SystemAudioCaptureState};
+use state::{AudioMeterState, SessionState, SystemAudioCaptureState, TranscriptionTaskState};
 use tauri::Manager;
 
 fn main() {
@@ -20,24 +20,29 @@ fn main() {
             }
             app.manage(SessionState::new(sessions));
             app.manage(SystemAudioCaptureState::default());
+            app.manage(AudioMeterState::default());
+            app.manage(TranscriptionTaskState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::session_commands::create_session,
+            commands::session_commands::import_media_session,
             commands::session_commands::list_sessions,
             commands::session_commands::get_session,
+            commands::session_commands::list_transcription_models,
             commands::session_commands::append_segment,
             commands::session_commands::begin_audio_segment,
             commands::session_commands::append_audio_chunk,
             commands::session_commands::finish_audio_segment,
             commands::session_commands::initialize_live_preview,
             commands::session_commands::append_live_preview_chunk,
-            commands::session_commands::refresh_live_transcript,
+            commands::session_commands::queue_live_transcript_refresh,
             commands::session_commands::set_session_status,
             commands::session_commands::start_session_recording,
             commands::session_commands::pause_session_recording,
             commands::session_commands::resume_session_recording,
             commands::session_commands::stop_session_recording,
+            commands::session_commands::polish_session_transcript,
             commands::session_commands::save_session
         ])
         .run(tauri::generate_context!())

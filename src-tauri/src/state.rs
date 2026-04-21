@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Mutex,
+};
 
 use crate::models::LectureSession;
 use crate::system_audio::SystemAudioCapture;
@@ -59,5 +62,80 @@ impl SystemAudioCaptureState {
             .lock()
             .map_err(|_| String::from("Failed to acquire system audio capture lock."))?;
         Ok(captures.remove(session_id))
+    }
+}
+
+#[derive(Default)]
+pub struct AudioMeterState {
+    levels: Mutex<HashMap<String, f32>>,
+}
+
+impl AudioMeterState {
+    pub fn set(&self, session_id: &str, level: f32) -> Result<(), String> {
+        let mut levels = self
+            .levels
+            .lock()
+            .map_err(|_| String::from("Failed to acquire audio meter lock."))?;
+        levels.insert(session_id.to_string(), level);
+        Ok(())
+    }
+
+    pub fn get(&self, session_id: &str) -> Result<Option<f32>, String> {
+        let levels = self
+            .levels
+            .lock()
+            .map_err(|_| String::from("Failed to acquire audio meter lock."))?;
+        Ok(levels.get(session_id).copied())
+    }
+
+    pub fn remove(&self, session_id: &str) -> Result<(), String> {
+        let mut levels = self
+            .levels
+            .lock()
+            .map_err(|_| String::from("Failed to acquire audio meter lock."))?;
+        levels.remove(session_id);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct TranscriptionTaskState {
+    live_jobs: Mutex<HashSet<String>>,
+    final_jobs: Mutex<HashSet<String>>,
+}
+
+impl TranscriptionTaskState {
+    pub fn try_start_live(&self, session_id: &str) -> Result<bool, String> {
+        let mut jobs = self
+            .live_jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire live transcription job lock."))?;
+        Ok(jobs.insert(session_id.to_string()))
+    }
+
+    pub fn finish_live(&self, session_id: &str) -> Result<(), String> {
+        let mut jobs = self
+            .live_jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire live transcription job lock."))?;
+        jobs.remove(session_id);
+        Ok(())
+    }
+
+    pub fn try_start_final(&self, session_id: &str) -> Result<bool, String> {
+        let mut jobs = self
+            .final_jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire final transcription job lock."))?;
+        Ok(jobs.insert(session_id.to_string()))
+    }
+
+    pub fn finish_final(&self, session_id: &str) -> Result<(), String> {
+        let mut jobs = self
+            .final_jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire final transcription job lock."))?;
+        jobs.remove(session_id);
+        Ok(())
     }
 }

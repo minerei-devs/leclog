@@ -69,6 +69,7 @@ export function useSessionAudioRecorder({
   const sessionRef = useRef<LectureSession | null>(session);
   const [isCapturingAudio, setIsCapturingAudio] = useState(false);
   const [audioStatusLabel, setAudioStatusLabel] = useState("Microphone idle");
+  const [audioLevel, setAudioLevel] = useState(0);
 
   const releaseStream = useCallback(() => {
     if (livePreviewFlushTimerRef.current !== null) {
@@ -93,6 +94,7 @@ export function useSessionAudioRecorder({
     streamRef.current = null;
     recorderRef.current = null;
     setIsCapturingAudio(false);
+    setAudioLevel(0);
   }, []);
 
   useEffect(() => {
@@ -187,6 +189,9 @@ export function useSessionAudioRecorder({
           }
 
           const monoSample = Math.max(-1, Math.min(1, mixedSample / channelCount));
+          if (frameIndex % 128 === 0) {
+            setAudioLevel((previous) => previous * 0.55 + Math.abs(monoSample) * 0.45);
+          }
           const pcmValue =
             monoSample < 0
               ? Math.round(monoSample * 0x8000)
@@ -363,6 +368,7 @@ export function useSessionAudioRecorder({
   return {
     isCapturingAudio,
     audioStatusLabel,
+    audioLevel,
     stopSegment,
   };
 }

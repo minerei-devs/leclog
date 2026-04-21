@@ -1,4 +1,5 @@
 import type { PropsWithChildren } from "react";
+import { ArrowLeft } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 
 export function AppShell({ children }: PropsWithChildren) {
@@ -16,6 +17,7 @@ export function AppShell({ children }: PropsWithChildren) {
 
         {!isHome && !isRecordingRoute ? (
           <Link className="ghost-button" to="/">
+            <ArrowLeft className="button-icon" size={16} />
             Sessions
           </Link>
         ) : null}

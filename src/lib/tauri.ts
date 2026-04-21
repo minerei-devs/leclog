@@ -1,10 +1,30 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CaptureSource, LectureSession, TranscriptSegment } from "../types/session";
+import type {
+  CaptureSource,
+  LectureSession,
+  TranscriptionModelInfo,
+  TranscriptionSettings,
+  TranscriptSegment,
+} from "../types/session";
 
 export function createSession(title?: string, captureSource?: CaptureSource) {
   return invoke<LectureSession>("create_session", {
     title: title?.trim() ? title.trim() : null,
     captureSource: captureSource ?? "microphone",
+  });
+}
+
+export function importMediaSession(
+  filePath: string,
+  title?: string,
+  settings?: Partial<TranscriptionSettings>,
+) {
+  return invoke<LectureSession>("import_media_session", {
+    filePath,
+    title: title?.trim() ? title.trim() : null,
+    preferredModelId: settings?.preferredModelId ?? null,
+    preferredLanguage: settings?.preferredLanguage?.trim() || null,
+    promptTerms: settings?.promptTerms?.trim() || null,
   });
 }
 
@@ -14,6 +34,10 @@ export function listSessions() {
 
 export function getSession(id: string) {
   return invoke<LectureSession>("get_session", { id });
+}
+
+export function listTranscriptionModels() {
+  return invoke<TranscriptionModelInfo[]>("list_transcription_models");
 }
 
 export function appendSegment(sessionId: string, segment: TranscriptSegment) {
@@ -67,9 +91,15 @@ export function appendLivePreviewChunk(sessionId: string, chunk: number[]) {
   });
 }
 
-export function refreshLiveTranscript(sessionId: string) {
-  return invoke<LectureSession>("refresh_live_transcript", {
+export function queueLiveTranscriptRefresh(
+  sessionId: string,
+  settings?: Partial<TranscriptionSettings>,
+) {
+  return invoke<LectureSession>("queue_live_transcript_refresh", {
     sessionId,
+    preferredModelId: settings?.preferredModelId ?? null,
+    preferredLanguage: settings?.preferredLanguage?.trim() || null,
+    promptTerms: settings?.promptTerms?.trim() || null,
   });
 }
 
@@ -104,8 +134,17 @@ export function setSessionStatus(sessionId: string, status: string) {
   });
 }
 
-export function saveSession(sessionId: string) {
+export function saveSession(sessionId: string, settings?: Partial<TranscriptionSettings>) {
   return invoke<void>("save_session", {
+    sessionId,
+    preferredModelId: settings?.preferredModelId ?? null,
+    preferredLanguage: settings?.preferredLanguage?.trim() || null,
+    promptTerms: settings?.promptTerms?.trim() || null,
+  });
+}
+
+export function polishSessionTranscript(sessionId: string) {
+  return invoke<LectureSession>("polish_session_transcript", {
     sessionId,
   });
 }

@@ -5,7 +5,8 @@ export type SessionStatus =
   | "processing"
   | "done";
 
-export type CaptureSource = "microphone" | "systemAudio";
+export type CaptureSource = "microphone" | "systemAudio" | "importedMedia";
+export type TranscriptPhase = "idle" | "live" | "processing" | "ready" | "error";
 
 export interface TranscriptSegment {
   id: string;
@@ -30,8 +31,13 @@ export interface LectureSession {
   audioMimeType: string | null;
   normalizedAudioPath: string | null;
   processedTranscriptPath: string | null;
+  polishedTranscriptPath: string | null;
+  polishedTranscriptText: string | null;
   livePreviewAudioPath: string | null;
   livePreviewSampleRate: number | null;
+  transcriptPhase: TranscriptPhase;
+  transcriptError: string | null;
+  audioLevel: number | null;
   lastResumedAt: string | null;
   captureTargetLabel: string | null;
 }
@@ -41,4 +47,18 @@ export interface RecentState {
   draftTitle: string;
   draftCaptureSource: CaptureSource;
   lastViewedSessionId: string | null;
+}
+
+export interface TranscriptionModelInfo {
+  id: string;
+  label: string;
+  path: string;
+  sizeBytes: number;
+  recommended: boolean;
+}
+
+export interface TranscriptionSettings {
+  preferredModelId: string | null;
+  preferredLanguage: string;
+  promptTerms: string;
 }

@@ -3,9 +3,12 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useLiveSessionDuration } from "../hooks/useLiveSessionDuration";
 import { useLiveTranscript } from "../hooks/useLiveTranscript";
 import { useSessionAudioRecorder } from "../hooks/useSessionAudioRecorder";
+import { useSessionPolling } from "../hooks/useSessionPolling";
 import { useRecentState } from "../hooks/useRecentState";
+import { useTranscriptionSettings } from "../hooks/useTranscriptionSettings";
 import { getErrorMessage } from "../lib/errors";
 import { formatDuration } from "../lib/format";
+import { getCaptureSourceLabel } from "../lib/session";
 import {
   getSession,
   pauseSessionRecording,
@@ -15,7 +18,9 @@ import {
   stopSessionRecording,
 } from "../lib/tauri";
 import type { LectureSession } from "../types/session";
+import { AudioLevelMeter } from "./AudioLevelMeter";
 import { ControlBar } from "./ControlBar";
+import { PanelList } from "./PanelList";
 import { SessionArtifacts } from "./SessionArtifacts";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptPanel } from "./TranscriptPanel";
@@ -24,6 +29,7 @@ export function RecordingPage() {
   const navigate = useNavigate();
   const { sessionId } = useParams();
   const { updateRecentState } = useRecentState();
+  const { settings: transcriptionSettings } = useTranscriptionSettings();
   const [session, setSession] = useState<LectureSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isBusy, setIsBusy] = useState(false);
@@ -37,7 +43,7 @@ export function RecordingPage() {
     setError(message);
   }, []);
 
-  const { isCapturingAudio, audioStatusLabel, stopSegment } = useSessionAudioRecorder({
+  const { isCapturingAudio, audioStatusLabel, audioLevel, stopSegment } = useSessionAudioRecorder({
     session,
     onSessionUpdate: handleSessionUpdate,
     onError: handleError,
@@ -45,7 +51,21 @@ export function RecordingPage() {
   const liveDurationMs = useLiveSessionDuration(session);
   useLiveTranscript({
     session,
+    settings: transcriptionSettings,
     onSessionUpdate: handleSessionUpdate,
+    onError: handleError,
+  });
+  useSessionPolling({
+    sessionId,
+    enabled: Boolean(
+      session &&
+        (session.status === "recording" ||
+          session.status === "processing" ||
+          session.transcriptPhase === "live" ||
+          session.transcriptPhase === "processing"),
+    ),
+    intervalMs: 1_000,
+    onSession: handleSessionUpdate,
     onError: handleError,
   });
 
@@ -163,15 +183,13 @@ export function RecordingPage() {
       await stopSegment();
       const processing = await stopSessionRecording(session.id);
       setSession(processing);
-      await saveSession(session.id);
-      const completed = await getSession(session.id);
-      setSession(completed);
+      await saveSession(session.id, transcriptionSettings);
       await updateRecentState({
         activeSessionId: null,
-        draftCaptureSource: completed.captureSource,
-        lastViewedSessionId: completed.id,
+        draftCaptureSource: processing.captureSource,
+        lastViewedSessionId: processing.id,
       });
-      navigate("/");
+      navigate(`/session/${processing.id}`);
     } catch (reason) {
       setError(getErrorMessage(reason, "Failed to stop the session."));
     } finally {
@@ -194,9 +212,29 @@ export function RecordingPage() {
     );
   }
 
+  if (session.captureSource === "importedMedia") {
+    return (
+      <div className="panel">
+        <p className="error-banner">Imported media sessions open in the detail view.</p>
+        <Link className="ghost-button" to={`/session/${session.id}`}>
+          Open session detail
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <div className="page-grid recording-layout">
       <section className="panel">
+        <AudioLevelMeter
+          level={session.captureSource === "microphone" ? audioLevel : session.audioLevel ?? 0}
+          label={
+            session.captureSource === "microphone"
+              ? "Microphone input level"
+              : "System audio level"
+          }
+        />
+
         <div className="panel-header">
           <div>
             <p className="eyebrow">Recording</p>
@@ -205,24 +243,29 @@ export function RecordingPage() {
           <StatusBadge status={session.status} />
         </div>
 
-        <dl className="summary-grid">
-          <div>
-            <dt>Duration</dt>
-            <dd>{formatDuration(liveDurationMs)}</dd>
-          </div>
-          <div>
-            <dt>Transcript</dt>
-            <dd>{session.segments.length}</dd>
-          </div>
-          <div>
-            <dt>Source</dt>
-            <dd>{session.captureSource === "systemAudio" ? "System audio" : "Microphone"}</dd>
-          </div>
-        </dl>
-
-        {session.captureTargetLabel ? (
-          <p className="helper-text">Capture target: {session.captureTargetLabel}</p>
-        ) : null}
+        <PanelList
+          rows={[
+            {
+              label: "Duration",
+              value: formatDuration(liveDurationMs),
+            },
+            {
+              label: "Transcript",
+              value: `${session.segments.length} segment(s)`,
+            },
+            {
+              label: "Source",
+              value: getCaptureSourceLabel(session.captureSource),
+            },
+            {
+              label: "Transcript status",
+              value: session.transcriptPhase,
+            },
+            ...(session.captureTargetLabel
+              ? [{ label: "Capture target", value: session.captureTargetLabel }]
+              : []),
+          ]}
+        />
 
         <ControlBar
           status={session.status}
@@ -251,12 +294,15 @@ export function RecordingPage() {
 
         <SessionArtifacts session={session} />
 
+        {session.transcriptError ? (
+          <p className="error-banner">{session.transcriptError}</p>
+        ) : null}
         {error ? <p className="error-banner">{error}</p> : null}
       </section>
 
       <TranscriptPanel
         segments={session.segments}
-        emptyMessage="Transcript segments will appear here after you stop the session and local processing completes."
+        emptyMessage="Transcript segments will appear here during recording and finalize after background processing completes."
       />
     </div>
   );
