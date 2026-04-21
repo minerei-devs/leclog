@@ -36,6 +36,8 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
 
    - `LECLOG_WHISPER_PATH`
    - `LECLOG_WHISPER_MODEL_PATH`
+   - `LECLOG_WHISPER_LANGUAGE`
+   - `LECLOG_WHISPER_PROMPT`
 
    Example on macOS:
 
@@ -43,6 +45,13 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
    brew install whisper-cpp
    mkdir -p src-tauri/models
    curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin -o src-tauri/models/ggml-base.bin
+   ```
+
+   For Japanese lectures, these settings usually help:
+
+   ```bash
+   export LECLOG_WHISPER_LANGUAGE=ja
+   export LECLOG_WHISPER_PROMPT='授業 講義 先生 学生 発表'
    ```
 
 4. Start the app:

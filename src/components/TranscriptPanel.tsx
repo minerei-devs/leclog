@@ -25,9 +25,11 @@ export function TranscriptPanel({
             <article key={segment.id} className="segment-card">
               <div className="segment-meta">
                 <span>
-                  {formatDuration(segment.startMs)} - {formatDuration(segment.endMs)}
+                  {segment.isFinal
+                    ? `${formatDuration(segment.startMs)} - ${formatDuration(segment.endMs)}`
+                    : `~${formatDuration(segment.startMs)} - ~${formatDuration(segment.endMs)}`}
                 </span>
-                <span>{segment.isFinal ? "final" : "draft"}</span>
+                <span>{segment.isFinal ? "final" : "draft / approx"}</span>
               </div>
               <p>{segment.text}</p>
             </article>

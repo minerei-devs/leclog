@@ -65,7 +65,7 @@ export function useLiveTranscript({
       } finally {
         isRefreshingRef.current = false;
       }
-    }, 8_000);
+    }, 4_000);
 
     return () => {
       window.clearInterval(intervalId);

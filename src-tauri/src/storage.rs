@@ -24,14 +24,15 @@ const TRANSCRIPT_JSON_FILE_NAME: &str = "transcript.json";
 const LIVE_PREVIEW_AUDIO_FILE_NAME: &str = "live-preview.wav";
 const LIVE_TRANSCRIPT_JSON_FILE_NAME: &str = "live-transcript.json";
 const WAV_HEADER_LEN: u64 = 44;
-const DEFAULT_WHISPER_MODEL_FILE_NAMES: [&str; 7] = [
-    "ggml-base.bin",
+const DEFAULT_WHISPER_MODEL_FILE_NAMES: [&str; 8] = [
+    "ggml-large-v3-turbo.bin",
     "ggml-small.bin",
+    "ggml-base.bin",
     "ggml-tiny.bin",
     "ggml-base.en.bin",
     "ggml-small.en.bin",
     "ggml-tiny.en.bin",
-    "ggml-large-v3-turbo.bin",
+    "ggml-large-v3-turbo-q5_0.bin",
 ];
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -315,6 +316,7 @@ fn read_offset_ms(segment: &Value, key: &str) -> Option<u64> {
 fn parse_transcript_segments_with_finality(
     raw_json: &str,
     is_final: bool,
+    max_end_ms: Option<u64>,
 ) -> Result<Vec<TranscriptSegment>> {
     let payload: Value =
         serde_json::from_str(raw_json).context("Failed to parse the whisper transcript JSON.")?;
@@ -337,11 +339,15 @@ fn parse_transcript_segments_with_finality(
 
         let start_ms = read_offset_ms(item, "from").unwrap_or(0);
         let end_ms = read_offset_ms(item, "to").unwrap_or(start_ms.saturating_add(1));
+        let capped_end_ms = max_end_ms
+            .map(|limit| end_ms.min(limit))
+            .unwrap_or(end_ms)
+            .max(start_ms.saturating_add(1));
 
         segments.push(TranscriptSegment {
             id: Uuid::new_v4().to_string(),
             start_ms,
-            end_ms: end_ms.max(start_ms.saturating_add(1)),
+            end_ms: capped_end_ms,
             text: text.to_string(),
             is_final,
         });
@@ -504,6 +510,9 @@ fn transcribe_audio_path(
     audio_path: &Path,
     transcript_json_path: &Path,
     is_final: bool,
+    language: &str,
+    prompt: Option<&str>,
+    max_end_ms: Option<u64>,
 ) -> Result<Vec<TranscriptSegment>> {
     if !audio_path.exists() {
         anyhow::bail!("The audio file does not exist: {}", audio_path.display());
@@ -518,23 +527,29 @@ fn transcribe_audio_path(
     let output_base_str = output_base.to_string_lossy().to_string();
     let audio_path_str = audio_path.to_string_lossy().to_string();
     let model_path_str = model_path.to_string_lossy().to_string();
+    let mut args = vec![
+        String::from("--language"),
+        language.to_string(),
+        String::from("--model"),
+        model_path_str,
+        String::from("--file"),
+        audio_path_str,
+        String::from("--output-json"),
+        String::from("--output-json-full"),
+        String::from("--output-file"),
+        output_base_str,
+        String::from("--no-prints"),
+    ];
+    if let Some(prompt) = prompt {
+        let trimmed_prompt = prompt.trim();
+        if !trimmed_prompt.is_empty() {
+            args.push(String::from("--prompt"));
+            args.push(trimmed_prompt.to_string());
+        }
+    }
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
 
-    run_whisper_cli(
-        app,
-        &[
-            "--language",
-            "auto",
-            "--model",
-            &model_path_str,
-            "--file",
-            &audio_path_str,
-            "--output-json",
-            "--output-json-full",
-            "--output-file",
-            &output_base_str,
-            "--no-prints",
-        ],
-    )?;
+    run_whisper_cli(app, &arg_refs)?;
 
     let raw_transcript = fs::read(&transcript_json_path).with_context(|| {
         format!(
@@ -544,7 +559,39 @@ fn transcribe_audio_path(
     })?;
     let raw_transcript = String::from_utf8_lossy(&raw_transcript).into_owned();
 
-    parse_transcript_segments_with_finality(&raw_transcript, is_final)
+    parse_transcript_segments_with_finality(&raw_transcript, is_final, max_end_ms)
+}
+
+fn resolve_whisper_language() -> String {
+    env::var("LECLOG_WHISPER_LANGUAGE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| String::from("auto"))
+}
+
+fn resolve_whisper_prompt() -> Option<String> {
+    env::var("LECLOG_WHISPER_PROMPT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn wav_duration_ms(path: &Path, sample_rate: u32) -> Result<u64> {
+    let file_len = fs::metadata(path)
+        .with_context(|| format!("Failed to read WAV metadata at {}.", path.display()))?
+        .len();
+    if file_len <= WAV_HEADER_LEN {
+        return Ok(0);
+    }
+
+    let data_bytes = file_len - WAV_HEADER_LEN;
+    let bytes_per_second = u64::from(sample_rate) * 2;
+    if bytes_per_second == 0 {
+        return Ok(0);
+    }
+
+    Ok(data_bytes.saturating_mul(1000) / bytes_per_second)
 }
 
 pub fn transcribe_normalized_audio(
@@ -557,8 +604,18 @@ pub fn transcribe_normalized_audio(
         .map(PathBuf::from)
         .context("The session is missing a normalized audio file.")?;
     let transcript_json_path = transcript_json_path(app, &session.id)?;
+    let language = resolve_whisper_language();
+    let prompt = resolve_whisper_prompt();
 
-    transcribe_audio_path(app, &normalized_audio_path, &transcript_json_path, true)
+    transcribe_audio_path(
+        app,
+        &normalized_audio_path,
+        &transcript_json_path,
+        true,
+        &language,
+        prompt.as_deref(),
+        None,
+    )
 }
 
 pub fn transcribe_live_preview_audio(
@@ -578,8 +635,20 @@ pub fn transcribe_live_preview_audio(
         return Ok(Vec::new());
     }
     let transcript_json_path = live_transcript_json_path(app, &session.id)?;
+    let language = resolve_whisper_language();
+    let prompt = resolve_whisper_prompt();
+    let sample_rate = session.live_preview_sample_rate.unwrap_or(16_000);
+    let max_end_ms = Some(wav_duration_ms(&live_preview_audio_path, sample_rate)?);
 
-    transcribe_audio_path(app, &live_preview_audio_path, &transcript_json_path, false)
+    transcribe_audio_path(
+        app,
+        &live_preview_audio_path,
+        &transcript_json_path,
+        false,
+        &language,
+        prompt.as_deref(),
+        max_end_ms,
+    )
 }
 
 pub fn normalize_audio_for_transcript(app: &AppHandle, session: &LectureSession) -> Result<()> {
@@ -804,7 +873,8 @@ mod tests {
         }"#;
 
         let segments =
-            parse_transcript_segments_with_finality(raw, true).expect("segments should parse");
+            parse_transcript_segments_with_finality(raw, true, None)
+                .expect("segments should parse");
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].start_ms, 0);
         assert_eq!(segments[0].end_ms, 8500);
