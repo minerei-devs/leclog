@@ -48,6 +48,31 @@ export function finishAudioSegment(sessionId: string) {
   });
 }
 
+export function initializeLivePreview(
+  sessionId: string,
+  sampleRate: number,
+  reset = false,
+) {
+  return invoke<LectureSession>("initialize_live_preview", {
+    sessionId,
+    sampleRate,
+    reset,
+  });
+}
+
+export function appendLivePreviewChunk(sessionId: string, chunk: number[]) {
+  return invoke<void>("append_live_preview_chunk", {
+    sessionId,
+    chunk,
+  });
+}
+
+export function refreshLiveTranscript(sessionId: string) {
+  return invoke<LectureSession>("refresh_live_transcript", {
+    sessionId,
+  });
+}
+
 export function startSessionRecording(sessionId: string) {
   return invoke<LectureSession>("start_session_recording", {
     sessionId,

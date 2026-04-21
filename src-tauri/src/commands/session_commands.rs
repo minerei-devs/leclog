@@ -92,6 +92,8 @@ pub fn create_session(
         audio_mime_type: None,
         normalized_audio_path: None,
         processed_transcript_path: None,
+        live_preview_audio_path: None,
+        live_preview_sample_rate: None,
         last_resumed_at: None,
         capture_target_label: None,
     };
@@ -233,6 +235,86 @@ pub fn finish_audio_segment(
 }
 
 #[tauri::command]
+pub fn initialize_live_preview(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    session_id: String,
+    sample_rate: u32,
+    reset: bool,
+) -> Result<LectureSession, String> {
+    let (updated, snapshot) = state.mutate(|sessions| {
+        let session = sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
+
+        storage::initialize_live_preview_audio(&app, session, sample_rate, reset)
+            .map_err(|error| format!("Failed to initialize live preview audio: {error}"))?;
+        session.updated_at = now_iso();
+        Ok(session.clone())
+    })?;
+    persist_snapshot(&app, &snapshot)?;
+
+    Ok(present_session(&updated))
+}
+
+#[tauri::command]
+pub fn append_live_preview_chunk(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    session_id: String,
+    chunk: Vec<u8>,
+) -> Result<(), String> {
+    let sessions = state.clone_sessions()?;
+    let session = sessions
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
+
+    if session.status != SessionStatus::Recording && session.status != SessionStatus::Paused {
+        return Err(String::from(
+            "Live preview audio can only be appended for recording or paused sessions.",
+        ));
+    }
+
+    storage::append_live_preview_chunk(&session, &chunk)
+        .map_err(|error| format!("Failed to append live preview audio: {error}"))?;
+    let _ = app;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn refresh_live_transcript(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    session_id: String,
+) -> Result<LectureSession, String> {
+    let current = get_session(session_id.clone(), state.clone())?;
+    if current.status != SessionStatus::Recording && current.status != SessionStatus::Paused {
+        return Ok(current);
+    }
+
+    let live_segments = storage::transcribe_live_preview_audio(&app, &current)
+        .map_err(|error| format!("Failed to refresh the live transcript: {error}"))?;
+    if live_segments.is_empty() {
+        return Ok(current);
+    }
+
+    let (updated, snapshot) = state.mutate(|sessions| {
+        let session = sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
+        session.segments = live_segments.clone();
+        session.updated_at = now_iso();
+        Ok(session.clone())
+    })?;
+    persist_snapshot(&app, &snapshot)?;
+
+    Ok(present_session(&updated))
+}
+
+#[tauri::command]
 pub fn set_session_status(
     app: AppHandle,
     state: State<'_, SessionState>,
@@ -286,6 +368,8 @@ pub async fn start_session_recording(
         storage::ensure_session_paths(&app, session)
             .map_err(|error| format!("Failed to prepare session storage: {error}"))?;
         if session.capture_source == CaptureSource::SystemAudio {
+            storage::initialize_live_preview_audio(&app, session, 48_000, true)
+                .map_err(|error| format!("Failed to initialize live preview audio: {error}"))?;
             storage::start_audio_segment(&app, session, "mp4", "video/mp4")
                 .map_err(|error| format!("Failed to prepare the system audio capture file: {error}"))?;
         }
@@ -390,6 +474,9 @@ pub async fn resume_session_recording(
         }
 
         if session.capture_source == CaptureSource::SystemAudio {
+            let sample_rate = session.live_preview_sample_rate.unwrap_or(48_000);
+            storage::initialize_live_preview_audio(&app, session, sample_rate, false)
+                .map_err(|error| format!("Failed to initialize live preview audio: {error}"))?;
             storage::start_audio_segment(&app, session, "mp4", "video/mp4")
                 .map_err(|error| format!("Failed to prepare the system audio capture file: {error}"))?;
         }
@@ -503,11 +590,14 @@ pub fn save_session(
     })?;
     storage::normalize_audio_for_transcript(&app, &processing)
         .map_err(|error| format!("Failed to normalize the recorded audio: {error}"))?;
+    let transcribed_segments = storage::transcribe_normalized_audio(&app, &processing)
+        .map_err(|error| format!("Failed to transcribe the recorded audio: {error}"))?;
     let (updated, snapshot) = state.mutate(|sessions| {
         let session = sessions
             .iter_mut()
             .find(|session| session.id == session_id)
             .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
+        session.segments = transcribed_segments.clone();
         if session.status == SessionStatus::Processing {
             session.status = SessionStatus::Done;
         }

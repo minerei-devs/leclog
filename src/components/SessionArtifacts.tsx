@@ -31,6 +31,10 @@ export function SessionArtifacts({ session }: SessionArtifactsProps) {
       value: session.normalizedAudioPath,
     },
     {
+      label: "Live preview audio",
+      value: session.livePreviewAudioPath,
+    },
+    {
       label: "Processed transcript",
       value: session.processedTranscriptPath,
     },

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useLiveSessionDuration } from "../hooks/useLiveSessionDuration";
-import { useMockTranscriptStream } from "../hooks/useMockTranscriptStream";
+import { useLiveTranscript } from "../hooks/useLiveTranscript";
 import { useSessionAudioRecorder } from "../hooks/useSessionAudioRecorder";
 import { useRecentState } from "../hooks/useRecentState";
 import { getErrorMessage } from "../lib/errors";
@@ -43,8 +43,7 @@ export function RecordingPage() {
     onError: handleError,
   });
   const liveDurationMs = useLiveSessionDuration(session);
-
-  useMockTranscriptStream({
+  useLiveTranscript({
     session,
     onSessionUpdate: handleSessionUpdate,
     onError: handleError,
@@ -238,8 +237,8 @@ export function RecordingPage() {
           {session.captureSource === "systemAudio"
             ? "System audio capture uses macOS ScreenCaptureKit. Select your browser window, application, or display when the native picker opens."
             : "Real microphone audio is captured into local session files."}{" "}
-          Mock transcript segments are still appended every 2 seconds while the
-          session is recording.
+          Draft transcript segments refresh during recording, then a final
+          transcript is regenerated locally after you stop the session.
         </p>
         <p className="helper-text">
           {audioStatusLabel}
@@ -257,7 +256,7 @@ export function RecordingPage() {
 
       <TranscriptPanel
         segments={session.segments}
-        emptyMessage="Recording has started, but no transcript segments have been generated yet."
+        emptyMessage="Transcript segments will appear here after you stop the session and local processing completes."
       />
     </div>
   );

@@ -75,6 +75,10 @@ pub struct LectureSession {
     #[serde(default)]
     pub processed_transcript_path: Option<String>,
     #[serde(default)]
+    pub live_preview_audio_path: Option<String>,
+    #[serde(default)]
+    pub live_preview_sample_rate: Option<u32>,
+    #[serde(default)]
     pub last_resumed_at: Option<String>,
     #[serde(default)]
     pub capture_target_label: Option<String>,

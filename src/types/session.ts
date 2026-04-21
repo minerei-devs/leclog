@@ -30,6 +30,8 @@ export interface LectureSession {
   audioMimeType: string | null;
   normalizedAudioPath: string | null;
   processedTranscriptPath: string | null;
+  livePreviewAudioPath: string | null;
+  livePreviewSampleRate: number | null;
   lastResumedAt: string | null;
   captureTargetLabel: string | null;
 }

@@ -17,7 +17,8 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
 - Session list page
 - Recording page
 - Start, pause, resume, and stop controls
-- Mock live transcript stream that appends a segment every 2 seconds
+- Local microphone or macOS system-audio capture
+- Local transcript generation after stop using `whisper.cpp`
 - Session detail page
 - Local persistence without a database
 
@@ -31,7 +32,20 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
 
 2. Make sure your Rust toolchain is at least `1.77.2` because the Tauri Store plugin requires it.
 
-3. Start the app:
+3. Install `whisper.cpp` and place a GGML model at `src-tauri/models/ggml-base.bin`, or set:
+
+   - `LECLOG_WHISPER_PATH`
+   - `LECLOG_WHISPER_MODEL_PATH`
+
+   Example on macOS:
+
+   ```bash
+   brew install whisper-cpp
+   mkdir -p src-tauri/models
+   curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin -o src-tauri/models/ggml-base.bin
+   ```
+
+4. Start the app:
 
    ```bash
    pnpm tauri dev

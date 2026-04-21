@@ -3,9 +3,12 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use crate::models::{CaptureSource, LectureSession};
+#[cfg(target_os = "macos")]
+use crate::storage;
 
 #[cfg(target_os = "macos")]
 use screencapturekit::{
+    cm::CMSampleBuffer,
     content_sharing_picker::{
         SCContentSharingPicker, SCContentSharingPickerConfiguration,
         SCContentSharingPickerMode, SCPickedSource, SCPickerOutcome,
@@ -19,6 +22,7 @@ use screencapturekit::{
             audio::{AudioChannelCount, AudioSampleRate},
             SCStreamConfiguration,
         },
+        output_type::SCStreamOutputType,
         sc_stream::SCStream,
     },
 };
@@ -101,7 +105,35 @@ impl SystemAudioCapture {
             String::from("Failed to create the macOS recording output for system audio capture.")
         })?;
 
-        let stream = SCStream::new(&filter, &stream_config);
+        let preview_path = session.live_preview_audio_path.clone();
+        let preview_sample_rate = session.live_preview_sample_rate.unwrap_or(48_000);
+
+        let mut stream = SCStream::new(&filter, &stream_config);
+        if let Some(preview_path) = preview_path {
+            let handler_id = stream.add_output_handler(
+                move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
+                    if of_type != SCStreamOutputType::Audio {
+                        return;
+                    }
+
+                    let Some(chunk) = sample_buffer_to_pcm16_mono(&sample) else {
+                        return;
+                    };
+                    let _ = storage::append_live_preview_chunk_to_path(
+                        Path::new(&preview_path),
+                        preview_sample_rate,
+                        &chunk,
+                    );
+                },
+                SCStreamOutputType::Audio,
+            );
+            if handler_id.is_none() {
+                return Err(String::from(
+                    "Failed to attach the macOS system audio sample handler.",
+                ));
+            }
+        }
+
         stream
             .add_recording_output(&recording)
             .map_err(|error| format!("Failed to attach the recording output: {error}"))?;
@@ -151,4 +183,129 @@ fn describe_picker_source(
         SCPickedSource::Application(name) => format!("Application: {name}"),
         SCPickedSource::Unknown => format!("{style} capture"),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn sample_buffer_to_pcm16_mono(sample: &CMSampleBuffer) -> Option<Vec<u8>> {
+    if !sample.is_valid() || sample.num_samples() == 0 {
+        return None;
+    }
+
+    let format = sample.format_description()?;
+    if !format.is_audio() || !format.is_pcm() {
+        return None;
+    }
+
+    let channel_count = format.audio_channel_count().unwrap_or(1).max(1) as usize;
+    let frame_count = sample.num_samples();
+    let buffers = sample.audio_buffer_list()?;
+    let mut output = Vec::with_capacity(frame_count * 2);
+
+    if buffers.num_buffers() == 1 {
+        let buffer = buffers.get(0)?;
+        let raw = buffer.data();
+        let buffer_channels = buffer.number_channels.max(1) as usize;
+        let bytes_per_sample = raw.len() / frame_count.max(1) / buffer_channels.max(1);
+
+        match bytes_per_sample {
+            2 => {
+                for frame_index in 0..frame_count {
+                    let mut mixed = 0f32;
+                    for channel_index in 0..buffer_channels {
+                        let start = (frame_index * buffer_channels + channel_index) * 2;
+                        let sample = i16::from_le_bytes([raw[start], raw[start + 1]]) as f32
+                            / i16::MAX as f32;
+                        mixed += sample;
+                    }
+                    let mono = (mixed / buffer_channels as f32).clamp(-1.0, 1.0);
+                    output.extend_from_slice(&float_to_i16_sample(mono).to_le_bytes());
+                }
+            }
+            4 => {
+                for frame_index in 0..frame_count {
+                    let mut mixed = 0f32;
+                    for channel_index in 0..buffer_channels {
+                        let start = (frame_index * buffer_channels + channel_index) * 4;
+                        let sample = f32::from_le_bytes([
+                            raw[start],
+                            raw[start + 1],
+                            raw[start + 2],
+                            raw[start + 3],
+                        ]);
+                        mixed += sample;
+                    }
+                    let mono = (mixed / buffer_channels as f32).clamp(-1.0, 1.0);
+                    output.extend_from_slice(&float_to_i16_sample(mono).to_le_bytes());
+                }
+            }
+            _ => return None,
+        }
+
+        return Some(output);
+    }
+
+    let bytes_per_sample = buffers.get(0)?.data().len() / frame_count.max(1);
+    match bytes_per_sample {
+        2 => {
+            for frame_index in 0..frame_count {
+                let mut mixed = 0f32;
+                let mut seen_channels = 0usize;
+                for buffer in &buffers {
+                    let raw = buffer.data();
+                    let start = frame_index * 2;
+                    if start + 2 > raw.len() {
+                        continue;
+                    }
+                    let sample =
+                        i16::from_le_bytes([raw[start], raw[start + 1]]) as f32 / i16::MAX as f32;
+                    mixed += sample;
+                    seen_channels += 1;
+                }
+                if seen_channels == 0 {
+                    continue;
+                }
+                let mono = (mixed / seen_channels as f32).clamp(-1.0, 1.0);
+                output.extend_from_slice(&float_to_i16_sample(mono).to_le_bytes());
+            }
+        }
+        4 => {
+            for frame_index in 0..frame_count {
+                let mut mixed = 0f32;
+                let mut seen_channels = 0usize;
+                for buffer in &buffers {
+                    let raw = buffer.data();
+                    let start = frame_index * 4;
+                    if start + 4 > raw.len() {
+                        continue;
+                    }
+                    let sample = f32::from_le_bytes([
+                        raw[start],
+                        raw[start + 1],
+                        raw[start + 2],
+                        raw[start + 3],
+                    ]);
+                    mixed += sample;
+                    seen_channels += 1;
+                }
+                if seen_channels == 0 {
+                    continue;
+                }
+                let mono = (mixed / seen_channels as f32).clamp(-1.0, 1.0);
+                output.extend_from_slice(&float_to_i16_sample(mono).to_le_bytes());
+            }
+        }
+        _ => return None,
+    }
+
+    if output.is_empty() || channel_count == 0 {
+        None
+    } else {
+        Some(output)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn float_to_i16_sample(sample: f32) -> i16 {
+    let scaled = (sample * i16::MAX as f32).round();
+    scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }

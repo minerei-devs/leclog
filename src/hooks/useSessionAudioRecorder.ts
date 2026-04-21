@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   appendAudioChunk,
+  appendLivePreviewChunk,
   beginAudioSegment,
   finishAudioSegment,
+  initializeLivePreview,
 } from "../lib/tauri";
 import type { LectureSession } from "../types/session";
 
@@ -54,6 +56,12 @@ export function useSessionAudioRecorder({
 }: UseSessionAudioRecorderOptions) {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const monitorGainRef = useRef<GainNode | null>(null);
+  const livePreviewBytesRef = useRef<number[]>([]);
+  const livePreviewFlushTimerRef = useRef<number | null>(null);
   const stopPromiseRef = useRef<Promise<void> | null>(null);
   const stopResolverRef = useRef<(() => void) | null>(null);
   const isStartingRef = useRef(false);
@@ -63,6 +71,22 @@ export function useSessionAudioRecorder({
   const [audioStatusLabel, setAudioStatusLabel] = useState("Microphone idle");
 
   const releaseStream = useCallback(() => {
+    if (livePreviewFlushTimerRef.current !== null) {
+      window.clearInterval(livePreviewFlushTimerRef.current);
+      livePreviewFlushTimerRef.current = null;
+    }
+    livePreviewBytesRef.current = [];
+
+    processorNodeRef.current?.disconnect();
+    sourceNodeRef.current?.disconnect();
+    monitorGainRef.current?.disconnect();
+    processorNodeRef.current = null;
+    sourceNodeRef.current = null;
+    monitorGainRef.current = null;
+
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+
     for (const track of streamRef.current?.getTracks() ?? []) {
       track.stop();
     }
@@ -90,7 +114,8 @@ export function useSessionAudioRecorder({
     if (
       typeof navigator === "undefined" ||
       !navigator.mediaDevices?.getUserMedia ||
-      typeof MediaRecorder === "undefined"
+      typeof MediaRecorder === "undefined" ||
+      typeof AudioContext === "undefined"
     ) {
       onError("This environment does not support microphone recording.");
       return;
@@ -109,12 +134,38 @@ export function useSessionAudioRecorder({
       });
       streamRef.current = stream;
 
+      const audioContext = new AudioContext();
+      await audioContext.resume();
+      audioContextRef.current = audioContext;
+      const sourceNode = audioContext.createMediaStreamSource(stream);
+      const processorNode = audioContext.createScriptProcessor(
+        16_384,
+        sourceNode.channelCount,
+        1,
+      );
+      const monitorGain = audioContext.createGain();
+      monitorGain.gain.value = 0;
+      sourceNode.connect(processorNode);
+      processorNode.connect(monitorGain);
+      monitorGain.connect(audioContext.destination);
+      sourceNodeRef.current = sourceNode;
+      processorNodeRef.current = processorNode;
+      monitorGainRef.current = monitorGain;
+
       const requestedMimeType = chooseSupportedMimeType();
       const recorder = requestedMimeType
         ? new MediaRecorder(stream, { mimeType: requestedMimeType })
         : new MediaRecorder(stream);
       const resolvedMimeType = recorder.mimeType || requestedMimeType || "audio/webm";
       const extension = extensionForMimeType(resolvedMimeType);
+
+      const previewReadySession = await initializeLivePreview(
+        currentSession.id,
+        Math.round(audioContext.sampleRate),
+        currentSession.livePreviewAudioPath === null,
+      );
+      sessionRef.current = previewReadySession;
+      onSessionUpdate(previewReadySession);
 
       const updatedSession = await beginAudioSegment(
         currentSession.id,
@@ -123,6 +174,48 @@ export function useSessionAudioRecorder({
       );
       sessionRef.current = updatedSession;
       onSessionUpdate(updatedSession);
+
+      processorNode.onaudioprocess = (event) => {
+        const input = event.inputBuffer;
+        const channelCount = input.numberOfChannels || 1;
+        const frameCount = input.length;
+
+        for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+          let mixedSample = 0;
+          for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+            mixedSample += input.getChannelData(channelIndex)[frameIndex] ?? 0;
+          }
+
+          const monoSample = Math.max(-1, Math.min(1, mixedSample / channelCount));
+          const pcmValue =
+            monoSample < 0
+              ? Math.round(monoSample * 0x8000)
+              : Math.round(monoSample * 0x7fff);
+          const normalizedValue = Math.max(-32768, Math.min(32767, pcmValue));
+          const unsignedValue =
+            normalizedValue < 0 ? normalizedValue + 0x1_0000 : normalizedValue;
+          livePreviewBytesRef.current.push(unsignedValue & 0xff);
+          livePreviewBytesRef.current.push((unsignedValue >> 8) & 0xff);
+        }
+      };
+
+      livePreviewFlushTimerRef.current = window.setInterval(() => {
+        const previewChunk = livePreviewBytesRef.current.splice(
+          0,
+          livePreviewBytesRef.current.length,
+        );
+        if (previewChunk.length === 0) {
+          return;
+        }
+
+        void appendLivePreviewChunk(updatedSession.id, previewChunk).catch((error) => {
+          onError(
+            error instanceof Error
+              ? error.message
+              : "Failed to persist the live preview audio chunk.",
+          );
+        });
+      }, 1_000);
 
       recorder.ondataavailable = (event) => {
         void (async () => {
@@ -145,6 +238,15 @@ export function useSessionAudioRecorder({
       recorder.onstop = () => {
         void (async () => {
           try {
+            const previewChunk = livePreviewBytesRef.current.splice(
+              0,
+              livePreviewBytesRef.current.length,
+            );
+            if (previewChunk.length > 0) {
+              const activeSessionForPreview = sessionRef.current ?? updatedSession;
+              await appendLivePreviewChunk(activeSessionForPreview.id, previewChunk);
+            }
+
             const activeSession = sessionRef.current;
             if (activeSession) {
               const updated = await finishAudioSegment(activeSession.id);
