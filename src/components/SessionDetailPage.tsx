@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useRecentState } from "../hooks/useRecentState";
+import { getErrorMessage } from "../lib/errors";
 import { formatDate, formatDuration } from "../lib/format";
 import { getSession } from "../lib/tauri";
 import type { LectureSession } from "../types/session";
+import { SessionArtifacts } from "./SessionArtifacts";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptPanel } from "./TranscriptPanel";
 
@@ -39,9 +41,7 @@ export function SessionDetailPage() {
           return;
         }
 
-        setError(
-          reason instanceof Error ? reason.message : "Failed to load session detail.",
-        );
+        setError(getErrorMessage(reason, "Failed to load session detail."));
       })
       .finally(() => {
         if (isMounted) {
@@ -93,7 +93,17 @@ export function SessionDetailPage() {
             <dt>Duration</dt>
             <dd>{formatDuration(session.durationMs)}</dd>
           </div>
+          <div>
+            <dt>Source</dt>
+            <dd>{session.captureSource === "systemAudio" ? "System audio" : "Microphone"}</dd>
+          </div>
         </dl>
+
+        {session.captureTargetLabel ? (
+          <p className="helper-text">Capture target: {session.captureTargetLabel}</p>
+        ) : null}
+
+        <SessionArtifacts session={session} />
 
         <Link className="ghost-button" to="/">
           Back to sessions

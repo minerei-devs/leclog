@@ -8,8 +8,11 @@ interface SessionCardProps {
 }
 
 export function SessionCard({ session }: SessionCardProps) {
+  const href =
+    session.status === "done" ? `/session/${session.id}` : `/recording/${session.id}`;
+
   return (
-    <Link className="session-card" to={`/session/${session.id}`}>
+    <Link className="session-card" to={href}>
       <div className="session-card-header">
         <div>
           <h3>{session.title}</h3>
@@ -24,8 +27,12 @@ export function SessionCard({ session }: SessionCardProps) {
           <dd>{formatDuration(session.durationMs)}</dd>
         </div>
         <div>
-          <dt>Segments</dt>
+          <dt>Transcript</dt>
           <dd>{session.segments.length}</dd>
+        </div>
+        <div>
+          <dt>Source</dt>
+          <dd>{session.captureSource === "systemAudio" ? "System audio" : "Microphone"}</dd>
         </div>
       </dl>
     </Link>

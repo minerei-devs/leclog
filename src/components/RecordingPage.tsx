@@ -1,11 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { useLiveSessionDuration } from "../hooks/useLiveSessionDuration";
 import { useMockTranscriptStream } from "../hooks/useMockTranscriptStream";
+import { useSessionAudioRecorder } from "../hooks/useSessionAudioRecorder";
 import { useRecentState } from "../hooks/useRecentState";
+import { getErrorMessage } from "../lib/errors";
 import { formatDuration } from "../lib/format";
-import { getSession, saveSession, setSessionStatus } from "../lib/tauri";
+import {
+  getSession,
+  pauseSessionRecording,
+  startSessionRecording,
+  resumeSessionRecording,
+  saveSession,
+  stopSessionRecording,
+} from "../lib/tauri";
 import type { LectureSession } from "../types/session";
 import { ControlBar } from "./ControlBar";
+import { SessionArtifacts } from "./SessionArtifacts";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptPanel } from "./TranscriptPanel";
 
@@ -25,6 +36,13 @@ export function RecordingPage() {
   const handleError = useCallback((message: string) => {
     setError(message);
   }, []);
+
+  const { isCapturingAudio, audioStatusLabel, stopSegment } = useSessionAudioRecorder({
+    session,
+    onSessionUpdate: handleSessionUpdate,
+    onError: handleError,
+  });
+  const liveDurationMs = useLiveSessionDuration(session);
 
   useMockTranscriptStream({
     session,
@@ -54,9 +72,7 @@ export function RecordingPage() {
           return;
         }
 
-        setError(
-          reason instanceof Error ? reason.message : "Failed to load session.",
-        );
+        setError(getErrorMessage(reason, "Failed to load session."));
       })
       .finally(() => {
         if (isMounted) {
@@ -76,9 +92,33 @@ export function RecordingPage() {
 
     void updateRecentState({
       activeSessionId: session.status === "done" ? null : session.id,
+      draftCaptureSource: session.captureSource,
       lastViewedSessionId: session.id,
     });
-  }, [session?.id, session?.status, updateRecentState]);
+  }, [session?.captureSource, session?.id, session?.status, updateRecentState]);
+
+  async function handleStart() {
+    if (!session) {
+      return;
+    }
+
+    setError(null);
+    setIsBusy(true);
+
+    try {
+      const started = await startSessionRecording(session.id);
+      setSession(started);
+      await updateRecentState({
+        activeSessionId: started.id,
+        draftCaptureSource: started.captureSource,
+        lastViewedSessionId: started.id,
+      });
+    } catch (reason) {
+      setError(getErrorMessage(reason, "Failed to start the session."));
+    } finally {
+      setIsBusy(false);
+    }
+  }
 
   async function updateStatus(nextStatus: "recording" | "paused") {
     if (!session) {
@@ -89,16 +129,24 @@ export function RecordingPage() {
     setIsBusy(true);
 
     try {
-      const updated = await setSessionStatus(session.id, nextStatus);
+      if (nextStatus === "paused") {
+        await stopSegment();
+      }
+
+      const updated =
+        session.status === "idle"
+          ? await startSessionRecording(session.id)
+          : nextStatus === "paused"
+            ? await pauseSessionRecording(session.id)
+            : await resumeSessionRecording(session.id);
       setSession(updated);
       await updateRecentState({
         activeSessionId: updated.id,
+        draftCaptureSource: updated.captureSource,
         lastViewedSessionId: updated.id,
       });
     } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : "Failed to update session state.",
-      );
+      setError(getErrorMessage(reason, "Failed to update session state."));
     } finally {
       setIsBusy(false);
     }
@@ -113,20 +161,20 @@ export function RecordingPage() {
     setIsBusy(true);
 
     try {
-      const processing = await setSessionStatus(session.id, "processing");
+      await stopSegment();
+      const processing = await stopSessionRecording(session.id);
       setSession(processing);
       await saveSession(session.id);
-      const completed = await setSessionStatus(session.id, "done");
+      const completed = await getSession(session.id);
       setSession(completed);
       await updateRecentState({
         activeSessionId: null,
+        draftCaptureSource: completed.captureSource,
         lastViewedSessionId: completed.id,
       });
       navigate("/");
     } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : "Failed to stop the session.",
-      );
+      setError(getErrorMessage(reason, "Failed to stop the session."));
     } finally {
       setIsBusy(false);
     }
@@ -161,30 +209,48 @@ export function RecordingPage() {
         <dl className="summary-grid">
           <div>
             <dt>Duration</dt>
-            <dd>{formatDuration(session.durationMs)}</dd>
+            <dd>{formatDuration(liveDurationMs)}</dd>
           </div>
           <div>
-            <dt>Segments</dt>
+            <dt>Transcript</dt>
             <dd>{session.segments.length}</dd>
           </div>
           <div>
-            <dt>State</dt>
-            <dd>{session.status}</dd>
+            <dt>Source</dt>
+            <dd>{session.captureSource === "systemAudio" ? "System audio" : "Microphone"}</dd>
           </div>
         </dl>
+
+        {session.captureTargetLabel ? (
+          <p className="helper-text">Capture target: {session.captureTargetLabel}</p>
+        ) : null}
 
         <ControlBar
           status={session.status}
           isBusy={isBusy}
+          onStart={handleStart}
           onPause={() => updateStatus("paused")}
           onResume={() => updateStatus("recording")}
           onStop={handleStop}
         />
 
         <p className="helper-text">
-          Mock transcript segments are appended every 2 seconds while the session
-          is recording.
+          {session.captureSource === "systemAudio"
+            ? "System audio capture uses macOS ScreenCaptureKit. Select your browser window, application, or display when the native picker opens."
+            : "Real microphone audio is captured into local session files."}{" "}
+          Mock transcript segments are still appended every 2 seconds while the
+          session is recording.
         </p>
+        <p className="helper-text">
+          {audioStatusLabel}
+          {isCapturingAudio ? "." : ""}
+        </p>
+        <p className="helper-text">
+          One uninterrupted take produces one capture file. Pausing and resuming
+          creates additional files for the same session.
+        </p>
+
+        <SessionArtifacts session={session} />
 
         {error ? <p className="error-banner">{error}</p> : null}
       </section>

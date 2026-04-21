@@ -3,5 +3,5 @@
   "identifier": "main-capability",
   "description": "Default capability for the Leclog main window",
   "windows": ["main"],
-  "permissions": ["core:default", "store:default"]
+  "permissions": ["core:default", "store:default", "opener:default"]
 }

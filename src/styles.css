@@ -29,6 +29,12 @@ input {
   font: inherit;
 }
 
+fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 button {
   cursor: pointer;
   border: 0;
@@ -59,7 +65,8 @@ a {
 
 .topbar h1,
 .panel h2,
-.session-card h3 {
+.session-card h3,
+.panel-subsection h3 {
   margin: 0;
 }
 
@@ -139,6 +146,41 @@ a {
   border: 1px solid rgba(71, 96, 122, 0.2);
   background: rgba(255, 255, 255, 0.9);
   color: inherit;
+}
+
+.source-selector {
+  display: grid;
+  gap: 10px;
+}
+
+.source-selector legend {
+  margin-bottom: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #5e7388;
+}
+
+.source-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(241, 246, 251, 0.82);
+  border: 1px solid rgba(71, 96, 122, 0.12);
+}
+
+.source-option input {
+  margin-top: 3px;
+}
+
+.source-option span {
+  display: grid;
+  gap: 3px;
+}
+
+.source-option small {
+  color: #5e7388;
 }
 
 .button-row,
@@ -245,6 +287,22 @@ a {
   color: #55687c;
 }
 
+.panel-subsection {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.panel-subsection-header {
+  display: grid;
+  gap: 4px;
+}
+
+.panel-subsection-header p {
+  margin: 0;
+  color: #55687c;
+}
+
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -306,6 +364,75 @@ a {
   gap: 10px;
   font-size: 0.82rem;
   color: #5f7386;
+}
+
+.artifact-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.artifact-list div {
+  padding: 12px 14px;
+  background: rgba(241, 246, 251, 0.82);
+  border-radius: 14px;
+}
+
+.artifact-list dt {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #5e7388;
+}
+
+.artifact-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.artifact-list dd {
+  margin: 6px 0 0;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.artifact-values {
+  display: grid;
+  gap: 8px;
+}
+
+.artifact-path-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.artifact-path-row > span {
+  min-width: 0;
+}
+
+.inline-button {
+  flex: none;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(220, 232, 246, 0.9);
+  color: #17436b;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.inline-button:hover {
+  transform: translateY(-1px);
+}
+
+.inline-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  transform: none;
 }
 
 .empty-state,

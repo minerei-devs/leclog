@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { getLiveDurationMs } from "../lib/session";
 import { appendSegment } from "../lib/tauri";
 import { buildMockSegment } from "../lib/mockSegments";
 import type { LectureSession } from "../types/session";
@@ -41,8 +42,9 @@ export function useMockTranscriptStream({
         const currentSession = sessionRef.current;
         const lastEndMs =
           currentSession.segments[currentSession.segments.length - 1]?.endMs ?? 0;
+        const liveDurationMs = getLiveDurationMs(currentSession);
         const nextStartMs = lastEndMs;
-        const nextEndMs = nextStartMs + 2_000;
+        const nextEndMs = Math.max(nextStartMs + 1, liveDurationMs);
         const nextSegment = buildMockSegment(
           segmentIndexRef.current,
           nextStartMs,

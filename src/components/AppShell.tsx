@@ -4,6 +4,7 @@ import { Link, useLocation } from "react-router-dom";
 export function AppShell({ children }: PropsWithChildren) {
   const location = useLocation();
   const isHome = location.pathname === "/";
+  const isRecordingRoute = location.pathname.startsWith("/recording/");
 
   return (
     <div className="app-shell">
@@ -13,7 +14,7 @@ export function AppShell({ children }: PropsWithChildren) {
           <h1>Leclog</h1>
         </div>
 
-        {!isHome ? (
+        {!isHome && !isRecordingRoute ? (
           <Link className="ghost-button" to="/">
             Sessions
           </Link>
