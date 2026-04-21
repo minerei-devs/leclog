@@ -123,3 +123,29 @@ pub struct TranscriptionModelInfo {
     pub size_bytes: u64,
     pub recommended: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelDownloadStatus {
+    Idle,
+    Downloading,
+    Completed,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedTranscriptionModel {
+    pub id: String,
+    pub label: String,
+    pub source_url: String,
+    pub size_bytes: u64,
+    pub recommended: bool,
+    pub installed: bool,
+    pub installed_path: Option<String>,
+    pub download_status: ModelDownloadStatus,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub error: Option<String>,
+    pub managed_by_app: bool,
+}

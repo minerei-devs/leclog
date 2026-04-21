@@ -6,7 +6,10 @@ mod state;
 mod storage;
 mod system_audio;
 
-use state::{AudioMeterState, SessionState, SystemAudioCaptureState, TranscriptionTaskState};
+use state::{
+    AudioMeterState, ModelDownloadState, SessionState, SystemAudioCaptureState,
+    TranscriptionTaskState,
+};
 use tauri::Manager;
 
 fn main() {
@@ -22,6 +25,7 @@ fn main() {
             app.manage(SystemAudioCaptureState::default());
             app.manage(AudioMeterState::default());
             app.manage(TranscriptionTaskState::default());
+            app.manage(ModelDownloadState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -30,6 +34,9 @@ fn main() {
             commands::session_commands::list_sessions,
             commands::session_commands::get_session,
             commands::session_commands::list_transcription_models,
+            commands::session_commands::list_available_transcription_models,
+            commands::session_commands::download_transcription_model,
+            commands::session_commands::delete_transcription_model,
             commands::session_commands::append_segment,
             commands::session_commands::begin_audio_segment,
             commands::session_commands::append_audio_chunk,

@@ -4,10 +4,13 @@ use uuid::Uuid;
 
 use crate::{
     models::{
-        CaptureSource, LectureSession, SessionStatus, TranscriptPhase, TranscriptSegment,
-        TranscriptionModelInfo,
+        CaptureSource, LectureSession, ManagedTranscriptionModel, SessionStatus, TranscriptPhase,
+        TranscriptSegment, TranscriptionModelInfo,
     },
-    state::{AudioMeterState, SessionState, SystemAudioCaptureState, TranscriptionTaskState},
+    state::{
+        AudioMeterState, ModelDownloadState, SessionState, SystemAudioCaptureState,
+        TranscriptionTaskState,
+    },
     storage,
     system_audio::SystemAudioCapture,
 };
@@ -352,6 +355,74 @@ pub fn get_session(
 pub fn list_transcription_models(app: AppHandle) -> Result<Vec<TranscriptionModelInfo>, String> {
     storage::list_transcription_models(&app)
         .map_err(|error| format!("Failed to list transcription models: {error}"))
+}
+
+#[tauri::command]
+pub fn list_available_transcription_models(
+    app: AppHandle,
+    downloads: State<'_, ModelDownloadState>,
+) -> Result<Vec<ManagedTranscriptionModel>, String> {
+    let snapshot = downloads.snapshot()?;
+    Ok(storage::list_available_transcription_models(&app, &snapshot))
+}
+
+#[tauri::command]
+pub fn download_transcription_model(
+    app: AppHandle,
+    downloads: State<'_, ModelDownloadState>,
+    model_id: String,
+) -> Result<(), String> {
+    let catalog_entry = storage::list_available_transcription_models(&app, &downloads.snapshot()?)
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .ok_or_else(|| format!("Unsupported transcription model: {model_id}"))?;
+
+    if catalog_entry.installed {
+        downloads.upsert(catalog_entry)?;
+        return Ok(());
+    }
+
+    if !downloads.start(catalog_entry.clone())? {
+        return Ok(());
+    }
+
+    let app_handle = app.clone();
+    let job_model_id = model_id.clone();
+    std::thread::spawn(move || {
+        let result = storage::download_transcription_model(&app_handle, &job_model_id, |downloaded_bytes, total_bytes| {
+            app_handle
+                .state::<ModelDownloadState>()
+                .progress(&job_model_id, downloaded_bytes, total_bytes)
+        });
+
+        match result {
+            Ok(path) => {
+                let total_bytes = std::fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0);
+                let _ = app_handle
+                    .state::<ModelDownloadState>()
+                    .complete(&job_model_id, path.display().to_string(), total_bytes);
+            }
+            Err(error) => {
+                let _ = app_handle
+                    .state::<ModelDownloadState>()
+                    .fail(&job_model_id, error.to_string());
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_transcription_model(
+    app: AppHandle,
+    downloads: State<'_, ModelDownloadState>,
+    model_id: String,
+) -> Result<(), String> {
+    storage::delete_managed_transcription_model(&app, &model_id)
+        .map_err(|error| format!("Failed to delete the local model: {error}"))?;
+    downloads.clear(&model_id)?;
+    Ok(())
 }
 
 #[tauri::command]

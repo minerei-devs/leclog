@@ -3,7 +3,7 @@ use std::{
     sync::Mutex,
 };
 
-use crate::models::LectureSession;
+use crate::models::{LectureSession, ManagedTranscriptionModel, ModelDownloadStatus};
 use crate::system_audio::SystemAudioCapture;
 
 pub struct SessionState {
@@ -136,6 +136,112 @@ impl TranscriptionTaskState {
             .lock()
             .map_err(|_| String::from("Failed to acquire final transcription job lock."))?;
         jobs.remove(session_id);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct ModelDownloadState {
+    jobs: Mutex<HashMap<String, ManagedTranscriptionModel>>,
+}
+
+impl ModelDownloadState {
+    pub fn snapshot(&self) -> Result<HashMap<String, ManagedTranscriptionModel>, String> {
+        let jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire model download lock."))?;
+        Ok(jobs.clone())
+    }
+
+    pub fn upsert(&self, model: ManagedTranscriptionModel) -> Result<(), String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire model download lock."))?;
+        jobs.insert(model.id.clone(), model);
+        Ok(())
+    }
+
+    pub fn start(&self, mut model: ManagedTranscriptionModel) -> Result<bool, String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire model download lock."))?;
+        if jobs
+            .get(&model.id)
+            .is_some_and(|existing| existing.download_status == ModelDownloadStatus::Downloading)
+        {
+            return Ok(false);
+        }
+
+        model.download_status = ModelDownloadStatus::Downloading;
+        model.downloaded_bytes = 0;
+        model.total_bytes = Some(model.size_bytes);
+        model.error = None;
+        jobs.insert(model.id.clone(), model);
+        Ok(true)
+    }
+
+    pub fn progress(
+        &self,
+        model_id: &str,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    ) -> Result<(), String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire model download lock."))?;
+        if let Some(job) = jobs.get_mut(model_id) {
+            job.download_status = ModelDownloadStatus::Downloading;
+            job.downloaded_bytes = downloaded_bytes;
+            job.total_bytes = total_bytes.or(job.total_bytes);
+            job.error = None;
+        }
+        Ok(())
+    }
+
+    pub fn complete(
+        &self,
+        model_id: &str,
+        installed_path: String,
+        total_bytes: u64,
+    ) -> Result<(), String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire model download lock."))?;
+        if let Some(job) = jobs.get_mut(model_id) {
+            job.installed = true;
+            job.installed_path = Some(installed_path);
+            job.download_status = ModelDownloadStatus::Completed;
+            job.downloaded_bytes = total_bytes;
+            job.total_bytes = Some(total_bytes);
+            job.error = None;
+            job.managed_by_app = true;
+        }
+        Ok(())
+    }
+
+    pub fn fail(&self, model_id: &str, error: String) -> Result<(), String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire model download lock."))?;
+        if let Some(job) = jobs.get_mut(model_id) {
+            job.download_status = ModelDownloadStatus::Error;
+            job.error = Some(error);
+        }
+        Ok(())
+    }
+
+    pub fn clear(&self, model_id: &str) -> Result<(), String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| String::from("Failed to acquire model download lock."))?;
+        jobs.remove(model_id);
         Ok(())
     }
 }

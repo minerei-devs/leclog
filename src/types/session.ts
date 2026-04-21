@@ -7,6 +7,7 @@ export type SessionStatus =
 
 export type CaptureSource = "microphone" | "systemAudio" | "importedMedia";
 export type TranscriptPhase = "idle" | "live" | "processing" | "ready" | "error";
+export type ModelDownloadStatus = "idle" | "downloading" | "completed" | "error";
 
 export interface TranscriptSegment {
   id: string;
@@ -55,6 +56,21 @@ export interface TranscriptionModelInfo {
   path: string;
   sizeBytes: number;
   recommended: boolean;
+}
+
+export interface ManagedTranscriptionModel {
+  id: string;
+  label: string;
+  sourceUrl: string;
+  sizeBytes: number;
+  recommended: boolean;
+  installed: boolean;
+  installedPath: string | null;
+  downloadStatus: ModelDownloadStatus;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  error: string | null;
+  managedByApp: boolean;
 }
 
 export interface TranscriptionSettings {

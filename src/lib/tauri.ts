@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CaptureSource,
   LectureSession,
+  ManagedTranscriptionModel,
   TranscriptionModelInfo,
   TranscriptionSettings,
   TranscriptSegment,
@@ -38,6 +39,22 @@ export function getSession(id: string) {
 
 export function listTranscriptionModels() {
   return invoke<TranscriptionModelInfo[]>("list_transcription_models");
+}
+
+export function listAvailableTranscriptionModels() {
+  return invoke<ManagedTranscriptionModel[]>("list_available_transcription_models");
+}
+
+export function downloadTranscriptionModel(modelId: string) {
+  return invoke<void>("download_transcription_model", {
+    modelId,
+  });
+}
+
+export function deleteTranscriptionModel(modelId: string) {
+  return invoke<void>("delete_transcription_model", {
+    modelId,
+  });
 }
 
 export function appendSegment(sessionId: string, segment: TranscriptSegment) {

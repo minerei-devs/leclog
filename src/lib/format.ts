@@ -17,3 +17,19 @@ export function formatDate(date: string): string {
     timeStyle: "short",
   }).format(new Date(date));
 }
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unitIndex = -1;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+}

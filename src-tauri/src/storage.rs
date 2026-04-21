@@ -8,11 +8,15 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use reqwest::blocking::Client;
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-use crate::models::{LectureSession, SessionStatus, TranscriptSegment, TranscriptionModelInfo};
+use crate::models::{
+    LectureSession, ManagedTranscriptionModel, ModelDownloadStatus, SessionStatus,
+    TranscriptSegment, TranscriptionModelInfo,
+};
 
 const SESSIONS_FILE_NAME: &str = "sessions.json";
 const SESSIONS_DIR_NAME: &str = "sessions";
@@ -36,6 +40,14 @@ const DEFAULT_WHISPER_MODEL_FILE_NAMES: [&str; 8] = [
     "ggml-large-v3-turbo-q5_0.bin",
 ];
 
+const MODEL_REPOSITORY_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+const MANAGED_MODEL_CATALOG: [(&str, &str, u64, bool); 4] = [
+    ("ggml-base.bin", "Base", 142 * 1024 * 1024, false),
+    ("ggml-small.bin", "Small", 466 * 1024 * 1024, true),
+    ("ggml-large-v3-turbo-q5_0.bin", "Large v3 Turbo q5_0", 547 * 1024 * 1024, false),
+    ("ggml-large-v3-turbo.bin", "Large v3 Turbo", 1550 * 1024 * 1024, false),
+];
+
 fn ensure_parent_dir(path: &Path) -> Result<()> {
     let parent = path
         .parent()
@@ -49,6 +61,10 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf> {
         .path()
         .app_local_data_dir()
         .context("Failed to resolve the local app data directory.")
+}
+
+pub fn app_models_dir(app: &AppHandle) -> Result<PathBuf> {
+    Ok(app_data_dir(app)?.join("models"))
 }
 
 pub fn sessions_file_path(app: &AppHandle) -> Result<PathBuf> {
@@ -288,8 +304,8 @@ fn resolve_whisper_model_path(app: &AppHandle, preferred_model_id: Option<&str>)
 fn model_search_dirs(app: &AppHandle) -> Vec<PathBuf> {
     let mut search_dirs = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models")];
 
-    if let Ok(data_dir) = app_data_dir(app) {
-        search_dirs.push(data_dir.join("models"));
+    if let Ok(models_dir) = app_models_dir(app) {
+        search_dirs.push(models_dir);
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
@@ -298,6 +314,148 @@ fn model_search_dirs(app: &AppHandle) -> Vec<PathBuf> {
     }
 
     search_dirs
+}
+
+fn model_catalog() -> Vec<ManagedTranscriptionModel> {
+    MANAGED_MODEL_CATALOG
+        .iter()
+        .map(|(id, label, size_bytes, recommended)| ManagedTranscriptionModel {
+            id: (*id).to_string(),
+            label: (*label).to_string(),
+            source_url: format!("{MODEL_REPOSITORY_BASE_URL}/{id}?download=true"),
+            size_bytes: *size_bytes,
+            recommended: *recommended,
+            installed: false,
+            installed_path: None,
+            download_status: ModelDownloadStatus::Idle,
+            downloaded_bytes: 0,
+            total_bytes: Some(*size_bytes),
+            error: None,
+            managed_by_app: false,
+        })
+        .collect()
+}
+
+pub fn find_model_path_by_id(app: &AppHandle, model_id: &str) -> Option<PathBuf> {
+    let trimmed_id = model_id.trim();
+    if trimmed_id.is_empty() {
+        return None;
+    }
+
+    for dir in model_search_dirs(app) {
+        let candidate = dir.join(trimmed_id);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+pub fn list_available_transcription_models(
+    app: &AppHandle,
+    download_jobs: &std::collections::HashMap<String, ManagedTranscriptionModel>,
+) -> Vec<ManagedTranscriptionModel> {
+    let mut models = model_catalog();
+    for model in &mut models {
+        if let Some(path) = find_model_path_by_id(app, &model.id) {
+            model.installed = true;
+            model.installed_path = Some(path.display().to_string());
+            model.managed_by_app = path.starts_with(app_models_dir(app).unwrap_or_default());
+            model.download_status = ModelDownloadStatus::Completed;
+            model.downloaded_bytes = std::fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(model.size_bytes);
+            model.total_bytes = Some(model.downloaded_bytes);
+        }
+
+        if let Some(job) = download_jobs.get(&model.id) {
+            model.download_status = job.download_status.clone();
+            model.downloaded_bytes = job.downloaded_bytes;
+            model.total_bytes = job.total_bytes;
+            model.error = job.error.clone();
+            if job.installed {
+                model.installed = true;
+                model.installed_path = job.installed_path.clone();
+                model.managed_by_app = job.managed_by_app;
+            }
+        }
+    }
+
+    models.sort_by(|left, right| {
+        right
+            .recommended
+            .cmp(&left.recommended)
+            .then(right.installed.cmp(&left.installed))
+            .then(left.size_bytes.cmp(&right.size_bytes))
+    });
+    models
+}
+
+pub fn download_transcription_model<F>(
+    app: &AppHandle,
+    model_id: &str,
+    mut on_progress: F,
+) -> Result<PathBuf>
+where
+    F: FnMut(u64, Option<u64>) -> Result<(), String>,
+{
+    let catalog_item = model_catalog()
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .context("Unsupported transcription model.")?;
+    let models_dir = app_models_dir(app)?;
+    fs::create_dir_all(&models_dir).context("Failed to create the models directory.")?;
+    let destination_path = models_dir.join(&catalog_item.id);
+    if destination_path.exists() {
+        return Ok(destination_path);
+    }
+
+    let temp_path = models_dir.join(format!("{}.part", &catalog_item.id));
+    if temp_path.exists() {
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    let client = Client::builder()
+        .build()
+        .context("Failed to initialize the HTTP client.")?;
+    let mut response = client
+        .get(&catalog_item.source_url)
+        .send()
+        .with_context(|| format!("Failed to download {}.", catalog_item.label))?
+        .error_for_status()
+        .with_context(|| format!("The model server rejected the download for {}.", catalog_item.label))?;
+
+    let total_bytes = response.content_length().or(Some(catalog_item.size_bytes));
+    let mut file = fs::File::create(&temp_path)
+        .with_context(|| format!("Failed to create {}.", temp_path.display()))?;
+    let mut downloaded_bytes = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = std::io::Read::read(&mut response, &mut buffer)
+            .context("Failed to read the model download stream.")?;
+        if read == 0 {
+            break;
+        }
+
+        file.write_all(&buffer[..read])
+            .context("Failed to write model bytes to disk.")?;
+        downloaded_bytes = downloaded_bytes.saturating_add(read as u64);
+        on_progress(downloaded_bytes, total_bytes)
+            .map_err(|error| anyhow::anyhow!(error))?;
+    }
+
+    fs::rename(&temp_path, &destination_path)
+        .with_context(|| format!("Failed to finalize {}.", destination_path.display()))?;
+    Ok(destination_path)
+}
+
+pub fn delete_managed_transcription_model(app: &AppHandle, model_id: &str) -> Result<()> {
+    let path = app_models_dir(app)?.join(model_id);
+    if path.exists() {
+        fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove the model file at {}.", path.display()))?;
+    }
+    Ok(())
 }
 
 fn run_ffmpeg(app: &AppHandle, args: &[&str]) -> Result<()> {

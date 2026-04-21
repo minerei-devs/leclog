@@ -3,12 +3,14 @@ import { AppShell } from "./components/AppShell";
 import { RecordingPage } from "./components/RecordingPage";
 import { SessionDetailPage } from "./components/SessionDetailPage";
 import { SessionListPage } from "./components/SessionListPage";
+import { SettingsPage } from "./components/SettingsPage";
 
 function App() {
   return (
     <AppShell>
       <Routes>
         <Route path="/" element={<SessionListPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="/recording/:sessionId" element={<RecordingPage />} />
         <Route path="/session/:sessionId" element={<SessionDetailPage />} />
       </Routes>

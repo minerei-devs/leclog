@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { ArrowUpRight, Play } from "lucide-react";
+import { ArrowUpRight, Play, Settings } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   createSession,
   importMediaSession,
-  listTranscriptionModels,
   listSessions,
   startSessionRecording,
 } from "../lib/tauri";
 import { getErrorMessage } from "../lib/errors";
 import { getSessionHref } from "../lib/session";
-import type { CaptureSource, LectureSession, TranscriptionModelInfo } from "../types/session";
+import type { CaptureSource, LectureSession } from "../types/session";
+import { PanelList } from "./PanelList";
 import { SessionCard } from "./SessionCard";
 import { useRecentState } from "../hooks/useRecentState";
 import { useSessionPolling } from "../hooks/useSessionPolling";
@@ -22,11 +22,8 @@ export function SessionListPage() {
   const { recentState, isLoaded, updateRecentState } = useRecentState();
   const {
     settings: transcriptionSettings,
-    isLoaded: transcriptionSettingsLoaded,
-    updateSettings,
   } = useTranscriptionSettings();
   const [sessions, setSessions] = useState<LectureSession[]>([]);
-  const [models, setModels] = useState<TranscriptionModelInfo[]>([]);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftCaptureSource, setDraftCaptureSource] =
     useState<CaptureSource>("microphone");
@@ -57,26 +54,6 @@ export function SessionListPage() {
       .finally(() => {
         if (isMounted) {
           setIsLoading(false);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    void listTranscriptionModels()
-      .then((result) => {
-        if (isMounted) {
-          setModels(result);
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
-          setModels([]);
         }
       });
 
@@ -309,55 +286,27 @@ export function SessionListPage() {
 
         <section className="panel-subsection">
           <div className="panel-subsection-header">
-            <h3>Transcription defaults</h3>
-            <p>Lightweight settings stored locally. Processing runs in the background.</p>
+            <h3>Transcription settings</h3>
+            <p>Manage models, language, and prompts in one place.</p>
           </div>
 
-          <label className="field">
-            <span>Preferred model</span>
-            <select
-              value={transcriptionSettings.preferredModelId ?? ""}
-              onChange={(event) => {
-                const nextModelId = event.target.value || null;
-                void updateSettings({ preferredModelId: nextModelId });
-              }}
-              disabled={!transcriptionSettingsLoaded}
-            >
-              <option value="">Auto-detect recommended</option>
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.label}
-                  {model.recommended ? " (recommended)" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+          <PanelList
+            rows={[
+              {
+                label: "Preferred model",
+                value: transcriptionSettings.preferredModelId ?? "Auto-detect recommended",
+              },
+              {
+                label: "Language",
+                value: transcriptionSettings.preferredLanguage,
+              },
+            ]}
+          />
 
-          <label className="field">
-            <span>Language</span>
-            <input
-              value={transcriptionSettings.preferredLanguage}
-              onChange={(event) => {
-                void updateSettings({ preferredLanguage: event.target.value.trim() || "auto" });
-              }}
-              placeholder="ja"
-            />
-          </label>
-
-          <label className="field">
-            <span>Prompt terms</span>
-            <input
-              value={transcriptionSettings.promptTerms}
-              onChange={(event) => {
-                void updateSettings({ promptTerms: event.target.value });
-              }}
-              placeholder="授業 講義 先生 学生 発表"
-            />
-          </label>
-
-          <p className="helper-text">
-            Installed models: {models.length === 0 ? "none found yet" : models.length}
-          </p>
+          <Link className="ghost-button" to="/settings">
+            <Settings className="button-icon" size={16} />
+            Open settings
+          </Link>
         </section>
 
         {error ? <p className="error-banner">{error}</p> : null}
