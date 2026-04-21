@@ -3,3 +3,9 @@ registry = "sparse+https://index.crates.io/"
 
 [net]
 git-fetch-with-cli = true
+
+[target.aarch64-apple-darwin]
+runner = ["/bin/sh", "../.cargo/macos-runner.sh"]
+
+[target.x86_64-apple-darwin]
+runner = ["/bin/sh", "../.cargo/macos-runner.sh"]
