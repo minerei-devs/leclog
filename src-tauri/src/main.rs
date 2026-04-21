@@ -6,6 +6,7 @@ mod state;
 mod storage;
 
 use state::SessionState;
+use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
@@ -16,12 +17,12 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::create_session,
-            commands::list_sessions,
-            commands::get_session,
-            commands::append_segment,
-            commands::set_session_status,
-            commands::save_session
+            commands::session_commands::create_session,
+            commands::session_commands::list_sessions,
+            commands::session_commands::get_session,
+            commands::session_commands::append_segment,
+            commands::session_commands::set_session_status,
+            commands::session_commands::save_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running Leclog");
