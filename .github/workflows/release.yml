@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+      release_name:
+        description: "Optional release title"
+        required: false
+        default: ""
+        type: string
+      draft:
+        description: "Create the release as a draft"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref_name || inputs.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish-tauri:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag_name }}"
+            release_name="${{ inputs.release_name }}"
+            draft="${{ inputs.draft }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            release_name=""
+            draft="false"
+          fi
+
+          if [[ -z "${release_name}" ]]; then
+            release_name="Leclog ${tag}"
+          fi
+
+          if [[ "${tag}" == *-* ]]; then
+            prerelease="true"
+          else
+            prerelease="false"
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "release_name=${release_name}" >> "${GITHUB_OUTPUT}"
+          echo "draft=${draft}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and publish Tauri app
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: pnpm tauri
+          args: --target aarch64-apple-darwin
+          tagName: ${{ steps.meta.outputs.tag }}
+          releaseName: ${{ steps.meta.outputs.release_name }}
+          releaseCommitish: ${{ github.sha }}
+          releaseDraft: ${{ steps.meta.outputs.draft }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generateReleaseNotes: true

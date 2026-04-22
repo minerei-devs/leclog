@@ -59,3 +59,36 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
    ```bash
    pnpm tauri dev
    ```
+
+## Release
+
+This repository is now set up to build and publish a GitHub Release with GitHub Actions.
+
+Current scope:
+
+- macOS Apple Silicon (`aarch64-apple-darwin`)
+- Tauri app bundles: `.app` and `.dmg`
+- GitHub Release assets uploaded automatically by `.github/workflows/release.yml`
+
+Release flow:
+
+1. Keep the app version aligned in:
+
+   - `package.json`
+   - `src-tauri/Cargo.toml`
+   - `src-tauri/tauri.conf.json`
+
+2. Commit and push the version change.
+
+3. Create and push a tag that matches the version:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+4. GitHub Actions will build the macOS package and create a GitHub Release automatically.
+
+You can also run the workflow manually from the GitHub Actions page with `workflow_dispatch`.
+
+If you later want Intel macOS, Windows, or Linux release artifacts, add the matching `ffmpeg-<target-triple>` binaries under `src-tauri/binaries/` first, then expand the workflow matrix.
