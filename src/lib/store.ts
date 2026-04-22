@@ -1,6 +1,16 @@
 import { load } from "@tauri-apps/plugin-store";
 import type { CaptureSource, RecentState, TranscriptionSettings } from "../types/session";
 
+function buildDefaultDraftTitle(date = new Date()) {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  const hours = `${date.getHours()}`.padStart(2, "0");
+  const minutes = `${date.getMinutes()}`.padStart(2, "0");
+
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
+}
+
 const storePromise = load("settings.json", {
   autoSave: 200,
   defaults: {},
@@ -8,7 +18,7 @@ const storePromise = load("settings.json", {
 
 const defaultRecentState: RecentState = {
   activeSessionId: null,
-  draftTitle: "",
+  draftTitle: buildDefaultDraftTitle(),
   draftCaptureSource: "microphone",
   lastViewedSessionId: null,
 };
@@ -24,7 +34,8 @@ export async function getRecentState(): Promise<RecentState> {
   const store = await storePromise;
 
   const activeSessionId = (await store.get<string>("activeSessionId")) ?? null;
-  const draftTitle = (await store.get<string>("draftTitle")) ?? "";
+  const draftTitle =
+    (await store.get<string>("draftTitle")) ?? defaultRecentState.draftTitle;
   const draftCaptureSource =
     ((await store.get<CaptureSource>("draftCaptureSource")) as CaptureSource | null) ??
     "microphone";
@@ -107,3 +118,4 @@ export async function patchTranscriptionSettings(
 }
 
 export { defaultRecentState, defaultTranscriptionSettings };
+export { buildDefaultDraftTitle };

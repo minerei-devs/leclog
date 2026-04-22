@@ -1,4 +1,4 @@
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { RecordingPage } from "./components/RecordingPage";
 import { SessionDetailPage } from "./components/SessionDetailPage";
@@ -9,7 +9,8 @@ function App() {
   return (
     <AppShell>
       <Routes>
-        <Route path="/" element={<SessionListPage />} />
+        <Route path="/" element={<Navigate replace to="/new" />} />
+        <Route path="/new" element={<SessionListPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/recording/:sessionId" element={<RecordingPage />} />
         <Route path="/session/:sessionId" element={<SessionDetailPage />} />

@@ -1,65 +1,82 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { ArrowUpRight, Play, Settings } from "lucide-react";
+import { ArrowUpRight, Import, Play, Settings2 } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Link, useNavigate } from "react-router-dom";
-import {
-  createSession,
-  importMediaSession,
-  listSessions,
-  startSessionRecording,
-} from "../lib/tauri";
-import { getErrorMessage } from "../lib/errors";
-import { getSessionHref } from "../lib/session";
-import type { CaptureSource, LectureSession } from "../types/session";
-import { PanelList } from "./PanelList";
-import { SessionCard } from "./SessionCard";
-import { useRecentState } from "../hooks/useRecentState";
-import { useSessionPolling } from "../hooks/useSessionPolling";
-import { useTranscriptionSettings } from "../hooks/useTranscriptionSettings";
+import { useRecentState } from "@/hooks/useRecentState";
+import { useTranscriptionSettings } from "@/hooks/useTranscriptionSettings";
+import { getErrorMessage } from "@/lib/errors";
+import { getSessionHref } from "@/lib/session";
+import { buildDefaultDraftTitle } from "@/lib/store";
+import { createSession, importMediaSession, listSessions, startSessionRecording } from "@/lib/tauri";
+import type { CaptureSource, LectureSession } from "@/types/session";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+
+function SourceOption({
+  value,
+  title,
+  description,
+  selectedValue,
+  onSelect,
+}: {
+  value: CaptureSource;
+  title: string;
+  description: string;
+  selectedValue: CaptureSource;
+  onSelect: (value: CaptureSource) => void;
+}) {
+  const checked = selectedValue === value;
+
+  return (
+    <label
+      className={[
+        "flex cursor-pointer items-start gap-3 rounded-xl border px-4 py-4 transition-colors",
+        checked
+          ? "border-slate-900 bg-slate-950 text-slate-50 shadow-sm"
+          : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50",
+      ].join(" ")}
+    >
+      <RadioGroupItem
+        value={value}
+        checked={checked}
+        className={checked ? "border-white bg-white text-slate-950" : ""}
+        onClick={() => onSelect(value)}
+      />
+      <div className="space-y-1">
+        <div className={checked ? "text-sm font-medium text-white" : "text-sm font-medium"}>
+          {title}
+        </div>
+        <p className={checked ? "text-sm text-slate-300" : "text-sm text-slate-500"}>
+          {description}
+        </p>
+      </div>
+    </label>
+  );
+}
+
+function isGeneratedDraftTitle(value: string) {
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value.trim());
+}
 
 export function SessionListPage() {
   const navigate = useNavigate();
   const { recentState, isLoaded, updateRecentState } = useRecentState();
-  const {
-    settings: transcriptionSettings,
-  } = useTranscriptionSettings();
+  const { settings: transcriptionSettings } = useTranscriptionSettings();
   const [sessions, setSessions] = useState<LectureSession[]>([]);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftCaptureSource, setDraftCaptureSource] =
     useState<CaptureSource>("microphone");
-  const [isLoading, setIsLoading] = useState(true);
   const [isStarting, setIsStarting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isImportDragActive, setIsImportDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let isMounted = true;
-
-    void listSessions()
-      .then((result) => {
-        if (!isMounted) {
-          return;
-        }
-
-        setSessions(result);
-      })
-      .catch((reason) => {
-        if (!isMounted) {
-          return;
-        }
-
-        setError(getErrorMessage(reason, "Failed to load sessions."));
-      })
-      .finally(() => {
-        if (isMounted) {
-          setIsLoading(false);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
+    void listSessions().then(setSessions).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -67,9 +84,26 @@ export function SessionListPage() {
       return;
     }
 
-    setDraftTitle(recentState.draftTitle);
+    const nextDefaultTitle = buildDefaultDraftTitle();
+    const shouldRefreshDefaultTitle =
+      recentState.draftTitle.trim().length === 0 ||
+      isGeneratedDraftTitle(recentState.draftTitle);
+
+    setDraftTitle(shouldRefreshDefaultTitle ? nextDefaultTitle : recentState.draftTitle);
     setDraftCaptureSource(recentState.draftCaptureSource);
-  }, [isLoaded, recentState.draftCaptureSource, recentState.draftTitle]);
+
+    if (
+      shouldRefreshDefaultTitle &&
+      recentState.draftTitle !== nextDefaultTitle
+    ) {
+      void updateRecentState({ draftTitle: nextDefaultTitle });
+    }
+  }, [
+    isLoaded,
+    recentState.draftCaptureSource,
+    recentState.draftTitle,
+    updateRecentState,
+  ]);
 
   const activeSession = useMemo(
     () =>
@@ -81,19 +115,6 @@ export function SessionListPage() {
           ) ?? null,
     [recentState.activeSessionId, sessions],
   );
-  const hasActiveProcessing = sessions.some(
-    (session) =>
-      session.status !== "done" ||
-      session.transcriptPhase === "processing" ||
-      session.transcriptPhase === "live",
-  );
-
-  useSessionPolling({
-    enabled: hasActiveProcessing,
-    intervalMs: 1_500,
-    onSessions: setSessions,
-    onError: setError,
-  });
 
   useEffect(() => {
     let isMounted = true;
@@ -171,9 +192,10 @@ export function SessionListPage() {
     try {
       const created = await createSession(draftTitle, draftCaptureSource);
       const recording = await startSessionRecording(created.id);
+      const nextDefaultTitle = buildDefaultDraftTitle();
       await updateRecentState({
         activeSessionId: recording.id,
-        draftTitle,
+        draftTitle: nextDefaultTitle,
         draftCaptureSource,
         lastViewedSessionId: recording.id,
       });
@@ -186,156 +208,164 @@ export function SessionListPage() {
   }
 
   return (
-    <div className="page-grid">
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Lecture Session MVP</p>
-            <h2>Start a new recording</h2>
+    <section className="space-y-6">
+      <div className="space-y-2">
+        <Badge variant="outline" className="rounded-full border-slate-200 px-3 py-1">
+          New Session
+        </Badge>
+        <h2 className="text-3xl font-semibold tracking-tight text-slate-950">
+          Capture a fresh lecture session
+        </h2>
+        <p className="max-w-2xl text-sm text-slate-500">
+          Start recording on the left, or import existing audio and video on the right.
+        </p>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1.08fr)_minmax(340px,0.92fr)]">
+        <div className="min-w-0">
+          <div className="bg-transparent pr-2">
+            <CardHeader className="px-0 pb-5">
+              <CardTitle className="text-xl">Start recording</CardTitle>
+              <CardDescription>
+                Use a date-based session name by default, then choose your capture source.
+              </CardDescription>
+            </CardHeader>
+
+            <form className="space-y-6" onSubmit={handleStartSession}>
+              <div className="space-y-2">
+                <Label htmlFor="session-title">Session title</Label>
+                <Input
+                  id="session-title"
+                  value={draftTitle}
+                  onChange={(event) => {
+                    const nextTitle = event.target.value;
+                    setDraftTitle(nextTitle);
+                    void updateRecentState({ draftTitle: nextTitle });
+                  }}
+                  placeholder="2026-04-22 14:30"
+                  className="h-11 rounded-lg border-slate-200 bg-white"
+                />
+              </div>
+
+              <div className="space-y-3">
+                <Label>Recording source</Label>
+                <RadioGroup
+                  value={draftCaptureSource}
+                  onValueChange={(value) => {
+                    const nextValue = value as CaptureSource;
+                    setDraftCaptureSource(nextValue);
+                    void updateRecentState({ draftCaptureSource: nextValue });
+                  }}
+                  className="grid gap-3"
+                >
+                  <SourceOption
+                    value="microphone"
+                    title="Microphone"
+                    description="Record live lecture notes with the local recorder."
+                    selectedValue={draftCaptureSource}
+                    onSelect={(value) => {
+                      setDraftCaptureSource(value);
+                      void updateRecentState({ draftCaptureSource: value });
+                    }}
+                  />
+                  <SourceOption
+                    value="systemAudio"
+                    title="System audio"
+                    description="Capture a browser window, app, or display using the native picker."
+                    selectedValue={draftCaptureSource}
+                    onSelect={(value) => {
+                      setDraftCaptureSource(value);
+                      void updateRecentState({ draftCaptureSource: value });
+                    }}
+                  />
+                </RadioGroup>
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <Button type="submit" size="lg" className="rounded-lg px-4">
+                  <Play className="size-4" />
+                  {isStarting ? "Starting..." : "Start recording"}
+                </Button>
+
+                {activeSession ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="lg"
+                    className="rounded-lg px-4"
+                    onClick={() => navigate(`/recording/${activeSession.id}`)}
+                  >
+                    <ArrowUpRight className="size-4" />
+                    Reopen active
+                  </Button>
+                ) : null}
+              </div>
+            </form>
           </div>
         </div>
 
-        <form className="stack" onSubmit={handleStartSession}>
-          <label className="field">
-            <span>Session title</span>
-            <input
-              value={draftTitle}
-              onChange={(event) => {
-                const nextTitle = event.target.value;
-                setDraftTitle(nextTitle);
-                void updateRecentState({ draftTitle: nextTitle });
-              }}
-              placeholder="Distributed Systems Lecture"
-            />
-          </label>
+        <div className="min-w-0">
+          <div className="pl-0 lg:pl-2">
+            <CardHeader className="px-0 pb-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <CardTitle className="text-xl">Import media</CardTitle>
+                  <CardDescription>
+                    Drop audio or video files to create transcript-only sessions.
+                  </CardDescription>
+                </div>
+                <Import className="mt-0.5 size-4 text-slate-500" />
+              </div>
+            </CardHeader>
 
-          <fieldset className="source-selector">
-            <legend>Recording source</legend>
+            <div
+              className={[
+                "grid min-h-56 place-items-center rounded-xl border border-dashed px-6 py-8 text-center transition-colors",
+                isImportDragActive
+                  ? "border-slate-900 bg-slate-950 text-white"
+                  : "border-slate-300 bg-white text-slate-950",
+              ].join(" ")}
+            >
+              <div className="space-y-3">
+                <p className="text-base font-medium">
+                  {isImporting ? "Importing media..." : "Drop audio or video files here"}
+                </p>
+                <p className={isImportDragActive ? "text-sm text-slate-300" : "text-sm text-slate-500"}>
+                  Imported files are normalized with ffmpeg and transcribed in the background.
+                </p>
+              </div>
+            </div>
 
-            <label className="source-option">
-              <input
-                type="radio"
-                name="capture-source"
-                value="microphone"
-                checked={draftCaptureSource === "microphone"}
-                onChange={() => {
-                  setDraftCaptureSource("microphone");
-                  void updateRecentState({ draftCaptureSource: "microphone" });
-                }}
-              />
-              <span>
-                <strong>Microphone</strong>
-                <small>Uses the browser recorder and writes audio-only local files.</small>
-              </span>
-            </label>
+            <div className="mt-5 space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span className="text-slate-500">Preferred model</span>
+                <span className="font-medium text-slate-950">
+                  {transcriptionSettings.preferredModelId ?? "Auto-detect recommended"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span className="text-slate-500">Language</span>
+                <span className="font-medium text-slate-950">
+                  {transcriptionSettings.preferredLanguage}
+                </span>
+              </div>
+            </div>
 
-            <label className="source-option">
-              <input
-                type="radio"
-                name="capture-source"
-                value="systemAudio"
-                checked={draftCaptureSource === "systemAudio"}
-                onChange={() => {
-                  setDraftCaptureSource("systemAudio");
-                  void updateRecentState({ draftCaptureSource: "systemAudio" });
-                }}
-              />
-              <span>
-                <strong>System audio</strong>
-                <small>
-                  macOS opens a native picker so you can choose a browser window,
-                  application, or display.
-                </small>
-              </span>
-            </label>
-          </fieldset>
-
-          <div className="button-row">
-            <button className="primary-button" type="submit" disabled={isStarting}>
-              <Play className="button-icon" size={16} />
-              {isStarting ? "Starting..." : "Start"}
-            </button>
-
-            {activeSession ? (
-              <button
-                className="ghost-button"
-                type="button"
-                onClick={() => navigate(`/recording/${activeSession.id}`)}
-              >
-                <ArrowUpRight className="button-icon" size={16} />
-                Reopen active
-              </button>
-            ) : null}
-          </div>
-        </form>
-
-        <section className="panel-subsection">
-          <div className="panel-subsection-header">
-            <h3>Import media</h3>
-            <p>Drag audio or video files into this window to create transcript-only sessions.</p>
-          </div>
-
-          <div className={`dropzone ${isImportDragActive ? "dropzone-active" : ""}`}>
-            <strong>{isImporting ? "Importing media..." : "Drop audio or video files here"}</strong>
-            <p>
-              Imported files are copied into the app data directory, normalized with ffmpeg, then
-              transcribed in the background.
-            </p>
-          </div>
-        </section>
-
-        <section className="panel-subsection">
-          <div className="panel-subsection-header">
-            <h3>Transcription settings</h3>
-            <p>Manage models, language, and prompts in one place.</p>
-          </div>
-
-          <PanelList
-            rows={[
-              {
-                label: "Preferred model",
-                value: transcriptionSettings.preferredModelId ?? "Auto-detect recommended",
-              },
-              {
-                label: "Language",
-                value: transcriptionSettings.preferredLanguage,
-              },
-            ]}
-          />
-
-          <Link className="ghost-button" to="/settings">
-            <Settings className="button-icon" size={16} />
-            Open settings
-          </Link>
-        </section>
-
-        {error ? <p className="error-banner">{error}</p> : null}
-      </section>
-
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <h2>Saved sessions</h2>
-            <p>Each session keeps its own local folder and source capture files.</p>
+            <Button asChild variant="ghost" className="mt-4 rounded-lg px-0 text-slate-600">
+              <Link to="/settings">
+                <Settings2 className="size-4" />
+                Open settings
+              </Link>
+            </Button>
           </div>
         </div>
+      </div>
 
-        {isLoading ? <div className="empty-state">Loading sessions...</div> : null}
-
-        {!isLoading && sessions.length === 0 ? (
-          <div className="empty-state">
-            No sessions yet. Start one to begin local recording and background transcription.
-          </div>
-        ) : null}
-
-        {sessions.length > 0 ? (
-          <div className="session-list">
-            {sessions.map((session) => (
-              <SessionCard key={session.id} session={session} />
-            ))}
-          </div>
-        ) : null}
-      </section>
-    </div>
+      {error ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      ) : null}
+    </section>
   );
 }
