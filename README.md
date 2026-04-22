@@ -98,8 +98,8 @@ Release flow:
 3. Create and push a tag that matches the version:
 
    ```bash
-   git tag v0.2.3
-   git push origin v0.2.3
+   git tag v0.2.4
+   git push origin v0.2.4
    ```
 
 4. GitHub Actions will build the signed and notarized macOS package and create a GitHub Release automatically.
