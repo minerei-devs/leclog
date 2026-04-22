@@ -62,13 +62,28 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
 
 ## Release
 
-This repository is now set up to build and publish a GitHub Release with GitHub Actions.
+This repository is set up to build and publish a GitHub Release with GitHub Actions.
 
 Current scope:
 
 - macOS Apple Silicon (`aarch64-apple-darwin`)
 - Tauri app bundles: `.app` and `.dmg`
 - GitHub Release assets uploaded automatically by `.github/workflows/release.yml`
+- Signed and notarized macOS releases only
+
+Required GitHub Secrets:
+
+- `APPLE_CERTIFICATE`: base64-encoded `Developer ID Application` `.p12`
+- `APPLE_CERTIFICATE_PASSWORD`: password used when exporting the `.p12`
+- `APPLE_SIGNING_IDENTITY`: exact signing identity name from `security find-identity -v -p codesigning`
+- `APPLE_API_KEY`: App Store Connect API Key ID
+- `APPLE_API_ISSUER`: App Store Connect API Issuer ID
+- `APPLE_API_KEY_P8`: contents of the downloaded `AuthKey_<KEYID>.p8`
+
+The release workflow now fails fast if:
+
+- the tag version does not match `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`
+- any required Apple signing or notarization secret is missing
 
 Release flow:
 
@@ -83,11 +98,11 @@ Release flow:
 3. Create and push a tag that matches the version:
 
    ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag v0.2.1
+   git push origin v0.2.1
    ```
 
-4. GitHub Actions will build the macOS package and create a GitHub Release automatically.
+4. GitHub Actions will build the signed and notarized macOS package and create a GitHub Release automatically.
 
 You can also run the workflow manually from the GitHub Actions page with `workflow_dispatch`.
 

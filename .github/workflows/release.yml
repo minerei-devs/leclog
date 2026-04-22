@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v0.1.0"
+        description: "Release tag, for example v0.2.1"
         required: true
         type: string
       release_name:
@@ -31,6 +31,8 @@ concurrency:
 jobs:
   publish-tauri:
     runs-on: macos-latest
+    env:
+      CI: true
 
     steps:
       - name: Checkout repository
@@ -84,10 +86,76 @@ jobs:
           echo "draft=${draft}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
 
+      - name: Validate release version
+        shell: bash
+        run: |
+          tag_version="${{ steps.meta.outputs.tag }}"
+          tag_version="${tag_version#v}"
+
+          package_version="$(node -p "require('./package.json').version")"
+          tauri_version="$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json', 'utf8')).version")"
+          cargo_version="$(sed -n 's/^version = \"\\([^\"]*\\)\"$/\\1/p' src-tauri/Cargo.toml | head -n 1)"
+
+          if [[ "$package_version" != "$tag_version" || "$tauri_version" != "$tag_version" || "$cargo_version" != "$tag_version" ]]; then
+            echo "Release tag does not match versioned files." >&2
+            echo "tag: ${tag_version}" >&2
+            echo "package.json: ${package_version}" >&2
+            echo "src-tauri/tauri.conf.json: ${tauri_version}" >&2
+            echo "src-tauri/Cargo.toml: ${cargo_version}" >&2
+            exit 1
+          fi
+
+      - name: Validate macOS signing secrets
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          missing=()
+
+          for key in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            APPLE_API_KEY \
+            APPLE_API_ISSUER \
+            APPLE_API_KEY_P8
+          do
+            if [[ -z "${!key}" ]]; then
+              missing+=("${key}")
+            fi
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "Missing required GitHub secrets for signed and notarized macOS releases: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Write App Store Connect API key
+        shell: bash
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "${APPLE_API_KEY_P8}" > "${key_path}"
+          chmod 600 "${key_path}"
+          echo "APPLE_API_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
+
       - name: Build and publish Tauri app
-        uses: tauri-apps/tauri-action@action-v0.6.2
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
         with:
           tauriScript: pnpm tauri
           args: --target aarch64-apple-darwin
