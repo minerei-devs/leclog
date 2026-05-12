@@ -25,12 +25,17 @@ export function TranscriptPanel({
   onPolish,
 }: TranscriptPanelProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const [activeView, setActiveView] = useState<"polished" | "raw" | "timeline">(
+    polishedTranscriptText?.trim() ? "polished" : "raw",
+  );
   const sentenceChunks = useMemo(() => buildTranscriptSentenceChunks(segments), [segments]);
   const rawTranscript = useMemo(
     () => joinTranscriptSentenceChunks(sentenceChunks),
     [sentenceChunks],
   );
   const copyTarget = polishedTranscriptText?.trim() || rawTranscript;
+  const hasPolishedTranscript = Boolean(polishedTranscriptText?.trim());
+  const resolvedView = activeView === "polished" && !hasPolishedTranscript ? "raw" : activeView;
 
   async function handleCopyFullTranscript() {
     if (!copyTarget) {
@@ -49,11 +54,13 @@ export function TranscriptPanel({
   }
 
   return (
-    <section className="panel">
-      <div className="panel-header">
-        <h2>Transcript</h2>
-        <div className="panel-header-actions">
-          <p>{sentenceChunks.length} sentence(s)</p>
+    <section className="transcript-panel panel">
+      <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 className="text-base font-semibold text-slate-950">Transcript</h2>
+          <p className="mt-0.5 text-xs text-slate-500">{sentenceChunks.length} sentence(s)</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           {onPolish ? (
             <button
               className="ghost-button"
@@ -91,44 +98,82 @@ export function TranscriptPanel({
         <div className="empty-state compact-empty-state">{emptyMessage}</div>
       ) : (
         <>
-          {polishedTranscriptText?.trim() ? (
-            <section className="panel-subsection transcript-merged-block">
-              <div className="panel-subsection-header">
-                <h3>Polished transcript</h3>
-                <p>Paragraphized, cleaned up, and ready to share.</p>
-              </div>
-              <pre className="transcript-merged-text transcript-polished-text">
-                {polishedTranscriptText}
-              </pre>
-            </section>
+          <div className="mb-2 flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
+            {hasPolishedTranscript ? (
+              <button
+                type="button"
+                className={[
+                  "h-7 rounded-md px-2.5 text-xs font-medium transition-colors",
+                  resolvedView === "polished"
+                    ? "bg-white text-slate-950 shadow-sm"
+                    : "text-slate-600 hover:text-slate-950",
+                ].join(" ")}
+                onClick={() => setActiveView("polished")}
+              >
+                Polished
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className={[
+                "h-7 rounded-md px-2.5 text-xs font-medium transition-colors",
+                resolvedView === "raw"
+                  ? "bg-white text-slate-950 shadow-sm"
+                  : "text-slate-600 hover:text-slate-950",
+              ].join(" ")}
+              onClick={() => setActiveView("raw")}
+            >
+              Raw
+            </button>
+            <button
+              type="button"
+              className={[
+                "h-7 rounded-md px-2.5 text-xs font-medium transition-colors",
+                resolvedView === "timeline"
+                  ? "bg-white text-slate-950 shadow-sm"
+                  : "text-slate-600 hover:text-slate-950",
+              ].join(" ")}
+              onClick={() => setActiveView("timeline")}
+            >
+              Timeline
+            </button>
+          </div>
+
+          {resolvedView === "polished" ? (
+            <pre className="max-h-[70vh] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm leading-6 whitespace-pre-wrap text-slate-800">
+              {polishedTranscriptText}
+            </pre>
           ) : null}
 
-          <section className="panel-subsection transcript-merged-block">
-            <div className="panel-subsection-header">
-              <h3>Raw transcript</h3>
-              <p>Sentence chunks joined directly from the timeline.</p>
-            </div>
-            <pre className="transcript-merged-text">{rawTranscript}</pre>
-          </section>
+          {resolvedView === "raw" ? (
+            <pre className="max-h-[70vh] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm leading-6 whitespace-pre-wrap text-slate-800">
+              {rawTranscript}
+            </pre>
+          ) : null}
 
-          <div className="segment-list">
-            {sentenceChunks.map((chunk) => (
-              <article
-                key={chunk.id}
-                className={`segment-card ${chunk.isResolved ? "" : "segment-card-muted"}`}
-              >
-                <div className="segment-meta">
-                  <span>
-                    {chunk.isResolved
-                      ? `${formatDuration(chunk.startMs)} - ${formatDuration(chunk.endMs)}`
-                      : `~${formatDuration(chunk.startMs)} - ~${formatDuration(chunk.endMs)}`}
-                  </span>
-                  <span>{chunk.isResolved ? "ready" : "draft / unresolved"}</span>
-                </div>
-                <p>{chunk.text}</p>
-              </article>
-            ))}
-          </div>
+          {resolvedView === "timeline" ? (
+            <div className="max-h-[70vh] overflow-auto rounded-lg border border-slate-200 bg-white">
+              {sentenceChunks.map((chunk) => (
+                <article
+                  key={chunk.id}
+                  className={[
+                    "grid gap-1 border-b border-slate-100 px-3 py-2 last:border-b-0",
+                    chunk.isResolved ? "" : "bg-slate-50/70",
+                  ].join(" ")}
+                >
+                  <div className="flex items-center justify-between gap-3 text-[11px] text-slate-500">
+                    <span className="tabular-nums">
+                      {chunk.isResolved
+                        ? `${formatDuration(chunk.startMs)} - ${formatDuration(chunk.endMs)}`
+                        : `~${formatDuration(chunk.startMs)} - ~${formatDuration(chunk.endMs)}`}
+                    </span>
+                    <span>{chunk.isResolved ? "ready" : "draft / unresolved"}</span>
+                  </div>
+                  <p className="text-sm leading-6 text-slate-800">{chunk.text}</p>
+                </article>
+              ))}
+            </div>
+          ) : null}
         </>
       )}
     </section>

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { ArrowUpRight, Import, Play, Settings2 } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useRecentState } from "@/hooks/useRecentState";
-import { useTranscriptionSettings } from "@/hooks/useTranscriptionSettings";
+import { useProcessingSettings } from "@/hooks/useProcessingSettings";
 import { getErrorMessage } from "@/lib/errors";
 import { getSessionHref } from "@/lib/session";
 import { buildDefaultDraftTitle } from "@/lib/store";
@@ -11,7 +11,6 @@ import { createSession, importMediaSession, listSessions, startSessionRecording 
 import type { CaptureSource, LectureSession } from "@/types/session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -34,11 +33,13 @@ function SourceOption({
   return (
     <label
       className={[
-        "flex cursor-pointer items-start gap-3 rounded-xl border px-4 py-4 transition-colors",
+        "flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 transition-colors",
         checked
           ? "border-slate-900 bg-slate-950 text-slate-50 shadow-sm"
           : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50",
       ].join(" ")}
+      aria-label={`${title}: ${description}`}
+      title={description}
     >
       <RadioGroupItem
         value={value}
@@ -46,13 +47,11 @@ function SourceOption({
         className={checked ? "border-white bg-white text-slate-950" : ""}
         onClick={() => onSelect(value)}
       />
-      <div className="space-y-1">
-        <div className={checked ? "text-sm font-medium text-white" : "text-sm font-medium"}>
+      <div className="min-w-0">
+        <div className={checked ? "truncate text-sm font-medium text-white" : "truncate text-sm font-medium"}>
           {title}
         </div>
-        <p className={checked ? "text-sm text-slate-300" : "text-sm text-slate-500"}>
-          {description}
-        </p>
+        <p className="sr-only">{description}</p>
       </div>
     </label>
   );
@@ -65,7 +64,7 @@ function isGeneratedDraftTitle(value: string) {
 export function SessionListPage() {
   const navigate = useNavigate();
   const { recentState, isLoaded, updateRecentState } = useRecentState();
-  const { settings: transcriptionSettings } = useTranscriptionSettings();
+  const { settings: processingSettings } = useProcessingSettings();
   const [sessions, setSessions] = useState<LectureSession[]>([]);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftCaptureSource, setDraftCaptureSource] =
@@ -150,7 +149,7 @@ export function SessionListPage() {
             const importedSessions: LectureSession[] = [];
             for (const path of paths) {
               importedSessions.push(
-                await importMediaSession(path, undefined, transcriptionSettings),
+                await importMediaSession(path, undefined, processingSettings),
               );
             }
 
@@ -182,7 +181,7 @@ export function SessionListPage() {
       isMounted = false;
       unlisten?.();
     };
-  }, [navigate, transcriptionSettings]);
+  }, [navigate, processingSettings]);
 
   async function handleStartSession(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -208,161 +207,156 @@ export function SessionListPage() {
   }
 
   return (
-    <section className="space-y-6">
-      <div className="space-y-2">
-        <Badge variant="outline" className="rounded-full border-slate-200 px-3 py-1">
-          New Session
-        </Badge>
-        <h2 className="text-3xl font-semibold tracking-tight text-slate-950">
-          Capture a fresh lecture session
-        </h2>
-        <p className="max-w-2xl text-sm text-slate-500">
-          Start recording on the left, or import existing audio and video on the right.
-        </p>
-      </div>
-
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1.08fr)_minmax(340px,0.92fr)]">
+    <section className="grid gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="bg-transparent pr-2">
-            <CardHeader className="px-0 pb-5">
-              <CardTitle className="text-xl">Start recording</CardTitle>
-              <CardDescription>
-                Use a date-based session name by default, then choose your capture source.
-              </CardDescription>
-            </CardHeader>
-
-            <form className="space-y-6" onSubmit={handleStartSession}>
-              <div className="space-y-2">
-                <Label htmlFor="session-title">Session title</Label>
-                <Input
-                  id="session-title"
-                  value={draftTitle}
-                  onChange={(event) => {
-                    const nextTitle = event.target.value;
-                    setDraftTitle(nextTitle);
-                    void updateRecentState({ draftTitle: nextTitle });
-                  }}
-                  placeholder="2026-04-22 14:30"
-                  className="h-11 rounded-lg border-slate-200 bg-white"
-                />
-              </div>
-
-              <div className="space-y-3">
-                <Label>Recording source</Label>
-                <RadioGroup
-                  value={draftCaptureSource}
-                  onValueChange={(value) => {
-                    const nextValue = value as CaptureSource;
-                    setDraftCaptureSource(nextValue);
-                    void updateRecentState({ draftCaptureSource: nextValue });
-                  }}
-                  className="grid gap-3"
-                >
-                  <SourceOption
-                    value="microphone"
-                    title="Microphone"
-                    description="Record live lecture notes with the local recorder."
-                    selectedValue={draftCaptureSource}
-                    onSelect={(value) => {
-                      setDraftCaptureSource(value);
-                      void updateRecentState({ draftCaptureSource: value });
-                    }}
-                  />
-                  <SourceOption
-                    value="systemAudio"
-                    title="System audio"
-                    description="Capture a browser window, app, or display using the native picker."
-                    selectedValue={draftCaptureSource}
-                    onSelect={(value) => {
-                      setDraftCaptureSource(value);
-                      void updateRecentState({ draftCaptureSource: value });
-                    }}
-                  />
-                </RadioGroup>
-              </div>
-
-              <div className="flex flex-wrap gap-3">
-                <Button type="submit" size="lg" className="rounded-lg px-4">
-                  <Play className="size-4" />
-                  {isStarting ? "Starting..." : "Start recording"}
-                </Button>
-
-                {activeSession ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="lg"
-                    className="rounded-lg px-4"
-                    onClick={() => navigate(`/recording/${activeSession.id}`)}
-                  >
-                    <ArrowUpRight className="size-4" />
-                    Reopen active
-                  </Button>
-                ) : null}
-              </div>
-            </form>
-          </div>
+          <Badge variant="outline" className="rounded-lg border-slate-200 px-2 py-0.5 text-[11px]">
+            New session
+          </Badge>
+          <h2 className="mt-1 text-lg font-semibold tracking-tight text-slate-950">
+            Capture or import
+          </h2>
         </div>
 
-        <div className="min-w-0">
-          <div className="pl-0 lg:pl-2">
-            <CardHeader className="px-0 pb-5">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <CardTitle className="text-xl">Import media</CardTitle>
-                  <CardDescription>
-                    Drop audio or video files to create transcript-only sessions.
-                  </CardDescription>
-                </div>
-                <Import className="mt-0.5 size-4 text-slate-500" />
-              </div>
-            </CardHeader>
+        <div
+          className="flex max-w-full flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600"
+          title="Default transcription settings. App-wide settings are managed in Settings."
+        >
+          <span className="font-medium text-slate-950">
+            {processingSettings.qualityPreset}
+          </span>
+          <span className="max-w-48 truncate">
+            {processingSettings.preferredModelId ?? "Preset model"}
+          </span>
+          <span>{processingSettings.language}</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Open settings"
+            title="Open settings"
+            onClick={() => window.dispatchEvent(new CustomEvent("leclog:open-settings"))}
+          >
+            <Settings2 className="size-3.5" />
+          </Button>
+        </div>
+      </div>
 
-            <div
-              className={[
-                "grid min-h-56 place-items-center rounded-xl border border-dashed px-6 py-8 text-center transition-colors",
-                isImportDragActive
-                  ? "border-slate-900 bg-slate-950 text-white"
-                  : "border-slate-300 bg-white text-slate-950",
-              ].join(" ")}
+      <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.62fr)]">
+        <form
+          className="grid gap-2 rounded-lg border border-slate-200 bg-white p-3 shadow-sm"
+          onSubmit={handleStartSession}
+        >
+          <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+            <div className="min-w-0 space-y-1.5">
+              <Label htmlFor="session-title" className="text-xs font-medium text-slate-600">
+                Session title
+              </Label>
+              <Input
+                id="session-title"
+                value={draftTitle}
+                onChange={(event) => {
+                  const nextTitle = event.target.value;
+                  setDraftTitle(nextTitle);
+                  void updateRecentState({ draftTitle: nextTitle });
+                }}
+                placeholder="2026-04-22 14:30"
+                className="h-8 rounded-lg border-slate-200 bg-white text-sm"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-2 md:justify-end">
+              <Button type="submit" size="sm" className="px-3">
+                <Play className="size-4" />
+                {isStarting ? "Starting..." : "Start recording"}
+              </Button>
+
+              {activeSession ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="px-3"
+                  onClick={() => navigate(`/recording/${activeSession.id}`)}
+                >
+                  <ArrowUpRight className="size-4" />
+                  Reopen active
+                </Button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="grid gap-1.5 md:grid-cols-[64px_minmax(0,1fr)] md:items-center">
+            <Label className="text-xs font-medium text-slate-600 md:pt-0">Source</Label>
+            <RadioGroup
+              value={draftCaptureSource}
+              onValueChange={(value) => {
+                const nextValue = value as CaptureSource;
+                setDraftCaptureSource(nextValue);
+                void updateRecentState({ draftCaptureSource: nextValue });
+              }}
+              className="grid gap-2 sm:grid-cols-2"
             >
-              <div className="space-y-3">
-                <p className="text-base font-medium">
-                  {isImporting ? "Importing media..." : "Drop audio or video files here"}
-                </p>
-                <p className={isImportDragActive ? "text-sm text-slate-300" : "text-sm text-slate-500"}>
-                  Imported files are normalized with ffmpeg and transcribed in the background.
-                </p>
-              </div>
-            </div>
+              <SourceOption
+                value="microphone"
+                title="Microphone"
+                description="Record live lecture notes with the local recorder."
+                selectedValue={draftCaptureSource}
+                onSelect={(value) => {
+                  setDraftCaptureSource(value);
+                  void updateRecentState({ draftCaptureSource: value });
+                }}
+              />
+              <SourceOption
+                value="systemAudio"
+                title="System audio"
+                description="Capture a browser window, app, or display using the native picker."
+                selectedValue={draftCaptureSource}
+                onSelect={(value) => {
+                  setDraftCaptureSource(value);
+                  void updateRecentState({ draftCaptureSource: value });
+                }}
+              />
+            </RadioGroup>
+          </div>
+        </form>
 
-            <div className="mt-5 space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-              <div className="flex items-center justify-between gap-3 text-sm">
-                <span className="text-slate-500">Preferred model</span>
-                <span className="font-medium text-slate-950">
-                  {transcriptionSettings.preferredModelId ?? "Auto-detect recommended"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3 text-sm">
-                <span className="text-slate-500">Language</span>
-                <span className="font-medium text-slate-950">
-                  {transcriptionSettings.preferredLanguage}
-                </span>
-              </div>
+        <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h3 className="truncate text-sm font-semibold text-slate-950">Import media</h3>
+              <p
+                className="truncate text-xs text-slate-500"
+                title="Drop audio or video files to create transcript-only sessions."
+              >
+                Drag audio/video files here
+              </p>
             </div>
+            <Import className="size-4 text-slate-500" />
+          </div>
 
-            <Button asChild variant="ghost" className="mt-4 rounded-lg px-0 text-slate-600">
-              <Link to="/settings">
-                <Settings2 className="size-4" />
-                Open settings
-              </Link>
-            </Button>
+          <div
+            className={[
+              "grid min-h-24 place-items-center rounded-lg border border-dashed px-4 py-4 text-center transition-colors",
+              isImportDragActive
+                ? "border-slate-900 bg-slate-950 text-white"
+                : "border-slate-300 bg-white text-slate-950",
+            ].join(" ")}
+          >
+            <div className="space-y-1">
+              <p className="text-sm font-medium">
+                {isImporting ? "Importing media..." : "Drop files here"}
+              </p>
+              <p className={isImportDragActive ? "text-xs text-slate-300" : "text-xs text-slate-500"}>
+                Normalize and transcribe in the background.
+              </p>
+            </div>
           </div>
         </div>
       </div>
 
       {error ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           {error}
         </div>
       ) : null}

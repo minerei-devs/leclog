@@ -78,3 +78,98 @@ export interface TranscriptionSettings {
   preferredLanguage: string;
   promptTerms: string;
 }
+
+export type ProcessingQualityPreset = "fast" | "balanced" | "accurate" | "custom";
+
+export interface ProcessingSettings {
+  qualityPreset: ProcessingQualityPreset;
+  preferredModelId: string | null;
+  language: string;
+  promptTerms: string;
+  chunkDurationMinutes: number;
+  chunkOverlapSeconds: number;
+  whisperThreads: number | null;
+  maxParallelChunks: number;
+  liveRefreshIntervalSeconds: number;
+}
+
+export type BackgroundTaskStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "canceled";
+
+export type BackgroundTaskKind =
+  | "finalTranscription"
+  | "liveTranscription"
+  | "modelDownload"
+  | "importMedia"
+  | "cleanup";
+
+export interface BackgroundTask {
+  id: string;
+  kind: BackgroundTaskKind;
+  status: BackgroundTaskStatus;
+  title: string;
+  step: string;
+  percent: number;
+  completedChunks: number;
+  totalChunks: number;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  error: string | null;
+  sessionId: string | null;
+  modelId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  cancelable: boolean;
+}
+
+export type ResourceKind =
+  | "appData"
+  | "sessionDir"
+  | "audio"
+  | "normalizedAudio"
+  | "livePreviewAudio"
+  | "transcript"
+  | "model"
+  | "partialDownload";
+
+export interface ResourceItem {
+  id: string;
+  kind: ResourceKind;
+  label: string;
+  path: string;
+  sizeBytes: number;
+  exists: boolean;
+  revealable: boolean;
+  deletable: boolean;
+  sessionId: string | null;
+  modelId: string | null;
+  updatedAt: string | null;
+}
+
+export interface ResourceOverview {
+  appDataDir: string;
+  totalBytes: number;
+  sessionBytes: number;
+  modelBytes: number;
+  processedBytes: number;
+  tempBytes: number;
+  resources: ResourceItem[];
+}
+
+export interface RuntimeStatus {
+  appDataDir: string;
+  isAppDataWritable: boolean;
+  ffmpegPath: string | null;
+  ffmpegAvailable: boolean;
+  whisperCliPath: string | null;
+  whisperAvailable: boolean;
+  installedModelCount: number;
+  installedModelLabels: string[];
+  processingSessionCount: number;
+  partialDownloadCount: number;
+  issues: string[];
+}

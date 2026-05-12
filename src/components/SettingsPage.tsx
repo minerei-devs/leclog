@@ -1,453 +1,769 @@
 import {
+  AlertTriangle,
+  CheckCircle2,
+  Copy,
   Download,
-  Languages,
+  FolderSearch,
+  Gauge,
+  HardDrive,
+  ListChecks,
+  RefreshCw,
   Settings2,
-  Sparkles,
+  SlidersHorizontal,
   Trash2,
   Workflow,
+  X,
+  XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { formatBytes } from "../lib/format";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import { formatBytes, formatDate } from "@/lib/format";
 import {
+  cancelBackgroundTask,
+  deleteResource,
   deleteTranscriptionModel,
   downloadTranscriptionModel,
+  getRuntimeStatus,
   listAvailableTranscriptionModels,
-} from "../lib/tauri";
-import type { ManagedTranscriptionModel } from "../types/session";
-import { PanelList } from "./PanelList";
-import { useTranscriptionSettings } from "../hooks/useTranscriptionSettings";
+  listBackgroundTasks,
+  listResources,
+  revealResource,
+} from "@/lib/tauri";
+import type {
+  BackgroundTask,
+  ManagedTranscriptionModel,
+  ProcessingQualityPreset,
+  ResourceItem,
+  ResourceKind,
+  ResourceOverview,
+  RuntimeStatus,
+} from "@/types/session";
+import { useProcessingSettings } from "@/hooks/useProcessingSettings";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
-type SettingsSectionId = "workspace" | "transcription" | "models";
+type SettingsPanelId = "overview" | "transcription" | "models" | "storage" | "tasks" | "gaps";
 
-const settingsSections: Array<{
-  id: SettingsSectionId;
+interface SettingsPageProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+const panels: Array<{
+  id: SettingsPanelId;
   label: string;
   description: string;
 }> = [
+  { id: "overview", label: "Overview", description: "Runtime health and defaults" },
+  { id: "transcription", label: "Transcription", description: "Quality, chunks, threads" },
+  { id: "models", label: "Models", description: "Whisper model files" },
+  { id: "storage", label: "Storage", description: "App-owned resources" },
+  { id: "tasks", label: "Tasks", description: "Background queue" },
+  { id: "gaps", label: "Product gaps", description: "Still unfinished" },
+];
+
+const presetLabels: Record<ProcessingQualityPreset, string> = {
+  fast: "Fast",
+  balanced: "Balanced",
+  accurate: "Accurate",
+  custom: "Custom",
+};
+
+const resourceKindLabels: Record<ResourceKind, string> = {
+  appData: "App data",
+  sessionDir: "Session",
+  audio: "Audio",
+  normalizedAudio: "Normalized",
+  livePreviewAudio: "Preview",
+  transcript: "Transcript",
+  model: "Model",
+  partialDownload: "Partial",
+};
+
+const productGaps = [
   {
-    id: "workspace",
-    label: "Workspace",
-    description: "Overview of local setup and defaults.",
+    title: "Transcript editor",
+    detail: "Currently transcripts can be copied and polished, but not edited, merged, searched, or corrected in place.",
   },
   {
-    id: "transcription",
-    label: "Transcription",
-    description: "Language, prompt terms, and default behavior.",
+    title: "Task persistence",
+    detail: "Tasks are visible for the current app run; deeper history and per-task logs still need persistent storage.",
   },
   {
-    id: "models",
-    label: "Models",
-    description: "Download and manage local Whisper models.",
+    title: "Import controls",
+    detail: "Drag-and-drop works, but there is no guided import dialog, file validation preview, or batch naming flow.",
+  },
+  {
+    title: "Export surface",
+    detail: "TXT artifacts exist; Markdown, SRT/VTT, PDF, and direct share/export presets are missing.",
+  },
+  {
+    title: "Resource cleanup policy",
+    detail: "Users can delete resources manually, but automatic retention rules and stale-cache cleanup are not defined.",
+  },
+  {
+    title: "Error recovery",
+    detail: "Reprocess is available, but failed tasks need clearer causes, logs, and one-click dependency fixes.",
   },
 ];
 
-function progressLabel(model: ManagedTranscriptionModel) {
-  if (model.downloadStatus !== "downloading") {
-    return null;
-  }
-
-  const total = model.totalBytes ?? model.sizeBytes;
-  if (!total) {
-    return "Downloading...";
-  }
-
-  const percentage = Math.min(100, Math.round((model.downloadedBytes / total) * 100));
-  return `${percentage}% · ${formatBytes(model.downloadedBytes)} / ${formatBytes(total)}`;
+function isActiveTask(task: BackgroundTask) {
+  return task.status === "queued" || task.status === "running";
 }
 
-export function SettingsPage() {
+function taskStatusClass(status: BackgroundTask["status"]) {
+  if (status === "running" || status === "queued") {
+    return "border-blue-200 bg-blue-50 text-blue-700";
+  }
+  if (status === "succeeded") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+  if (status === "failed") {
+    return "border-red-200 bg-red-50 text-red-700";
+  }
+  return "border-slate-200 bg-slate-100 text-slate-600";
+}
+
+function Stat({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2">
+      <p className="truncate text-[11px] font-medium uppercase tracking-[0.12em] text-slate-500">
+        {label}
+      </p>
+      <p className="mt-1 truncate text-sm font-semibold text-slate-950">{value}</p>
+      {detail ? <p className="mt-0.5 truncate text-xs text-slate-500">{detail}</p> : null}
+    </div>
+  );
+}
+
+function SectionHeader({
+  title,
+  detail,
+  icon,
+}: {
+  title: string;
+  detail: string;
+  icon: ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <h3 className="text-base font-semibold text-slate-950">{title}</h3>
+        <p className="mt-0.5 text-sm text-slate-500">{detail}</p>
+      </div>
+      <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-500">
+        {icon}
+      </div>
+    </div>
+  );
+}
+
+function ResourceLine({
+  resource,
+  onCopy,
+  onReveal,
+  onDelete,
+}: {
+  resource: ResourceItem;
+  onCopy: (path: string) => void;
+  onReveal: (path: string) => void;
+  onDelete: (resource: ResourceItem) => void;
+}) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-slate-100 py-2 last:border-b-0">
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <Badge variant="outline" className="rounded-md border-slate-200 bg-slate-50 px-1.5 text-[10px] text-slate-600">
+            {resourceKindLabels[resource.kind]}
+          </Badge>
+          <p className="truncate text-sm font-medium text-slate-950">{resource.label}</p>
+          <span className="shrink-0 text-xs text-slate-500">{formatBytes(resource.sizeBytes)}</span>
+        </div>
+        <p className="mt-1 truncate text-xs text-slate-500">{resource.path}</p>
+      </div>
+      <div className="flex items-center gap-1">
+        <Button type="button" variant="ghost" size="icon-sm" title="Copy path" onClick={() => onCopy(resource.path)}>
+          <Copy className="size-3.5" />
+        </Button>
+        {resource.revealable ? (
+          <Button type="button" variant="ghost" size="icon-sm" title="Reveal" onClick={() => onReveal(resource.path)}>
+            <FolderSearch className="size-3.5" />
+          </Button>
+        ) : null}
+        {resource.deletable ? (
+          <Button type="button" variant="destructive" size="icon-sm" title="Delete" onClick={() => onDelete(resource)}>
+            <Trash2 className="size-3.5" />
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
   const {
-    settings: transcriptionSettings,
+    settings: processingSettings,
     isLoaded: settingsLoaded,
     updateSettings,
-  } = useTranscriptionSettings();
+  } = useProcessingSettings();
+  const [activePanel, setActivePanel] = useState<SettingsPanelId>("overview");
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [resourceOverview, setResourceOverview] = useState<ResourceOverview | null>(null);
+  const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [models, setModels] = useState<ManagedTranscriptionModel[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [busyModelId, setBusyModelId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>("workspace");
+  const [busyId, setBusyId] = useState<string | null>(null);
 
-  async function refreshModels() {
-    const nextModels = await listAvailableTranscriptionModels();
+  const refresh = useCallback(async () => {
+    const [nextRuntimeStatus, nextResourceOverview, nextTasks, nextModels] =
+      await Promise.all([
+        getRuntimeStatus(),
+        listResources(),
+        listBackgroundTasks(),
+        listAvailableTranscriptionModels(),
+      ]);
+    setRuntimeStatus(nextRuntimeStatus);
+    setResourceOverview(nextResourceOverview);
+    setTasks(nextTasks);
     setModels(nextModels);
-  }
-
-  useEffect(() => {
-    let isMounted = true;
-
-    void refreshModels()
-      .catch((reason) => {
-        if (isMounted) {
-          setError(reason instanceof Error ? reason.message : "Failed to load models.");
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setIsLoading(false);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
+    setError(null);
   }, []);
 
   useEffect(() => {
-    if (!models.some((model) => model.downloadStatus === "downloading")) {
+    if (!isOpen) {
       return;
     }
 
-    const interval = window.setInterval(() => {
-      void refreshModels().catch(() => {});
-    }, 1000);
+    void refresh().catch((reason) => {
+      setError(reason instanceof Error ? reason.message : "Failed to load settings.");
+    });
+  }, [isOpen, refresh]);
 
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [models]);
+  useEffect(() => {
+    if (!isOpen || !tasks.some(isActiveTask)) {
+      return;
+    }
 
-  const installedCount = useMemo(
-    () => models.filter((model) => model.installed).length,
-    [models],
-  );
-  const preferredModelLabel = useMemo(
+    const intervalId = window.setInterval(() => {
+      void refresh().catch(() => {});
+    }, 1500);
+    return () => window.clearInterval(intervalId);
+  }, [isOpen, refresh, tasks]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
+  const installedCount = models.filter((model) => model.installed).length;
+  const preferredModelLabel =
+    models.find((model) => model.id === processingSettings.preferredModelId)?.label ??
+    processingSettings.preferredModelId ??
+    "Preset default";
+  const activeTaskCount = tasks.filter(isActiveTask).length;
+  const modelResources = useMemo(
     () =>
-      models.find((model) => model.id === transcriptionSettings.preferredModelId)?.label ??
-      transcriptionSettings.preferredModelId,
-    [models, transcriptionSettings.preferredModelId],
+      resourceOverview?.resources.filter((resource) =>
+        ["model", "partialDownload"].includes(resource.kind),
+      ) ?? [],
+    [resourceOverview],
   );
-  const recommendedModel = useMemo(
-    () => models.find((model) => model.recommended) ?? null,
-    [models],
-  );
+
+  async function handleCopy(path: string) {
+    await navigator.clipboard.writeText(path);
+  }
+
+  async function handleReveal(path: string) {
+    setBusyId(path);
+    try {
+      await revealResource(path);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to reveal resource.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDeleteResource(resource: ResourceItem) {
+    if (!window.confirm(`Delete ${resource.label}?`)) {
+      return;
+    }
+
+    setBusyId(resource.id);
+    try {
+      const nextOverview = await deleteResource(resource.path, resource.sessionId, resource.modelId);
+      setResourceOverview(nextOverview);
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to delete resource.");
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function handleDownload(modelId: string) {
-    setError(null);
-    setBusyModelId(modelId);
-
+    setBusyId(modelId);
     try {
       await downloadTranscriptionModel(modelId);
-      await refreshModels();
+      await refresh();
+      setActivePanel("tasks");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to start model download.");
     } finally {
-      setBusyModelId(null);
+      setBusyId(null);
     }
   }
 
-  async function handleDelete(modelId: string) {
-    setError(null);
-    setBusyModelId(modelId);
+  async function handleDeleteModel(modelId: string) {
+    if (!window.confirm(`Delete ${modelId}?`)) {
+      return;
+    }
 
+    setBusyId(modelId);
     try {
       await deleteTranscriptionModel(modelId);
-      if (transcriptionSettings.preferredModelId === modelId) {
+      if (processingSettings.preferredModelId === modelId) {
         await updateSettings({ preferredModelId: null });
       }
-      await refreshModels();
+      await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to delete model.");
     } finally {
-      setBusyModelId(null);
+      setBusyId(null);
     }
   }
 
+  async function handleCancelTask(taskId: string) {
+    setBusyId(taskId);
+    try {
+      await cancelBackgroundTask(taskId);
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to cancel task.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (!isOpen) {
+    return null;
+  }
+
+  const isBusy = busyId !== null;
+
   return (
-    <div className="settings-layout">
-      <aside className="settings-sidebar">
-        <div className="settings-sidebar-intro">
-          <p className="eyebrow">Settings</p>
-          <h2>Workspace preferences</h2>
-          <p>Keep capture, transcription, and model management in one place.</p>
-        </div>
+    <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/25 backdrop-blur-[2px]" role="dialog" aria-modal="true">
+      <button className="absolute inset-0 cursor-default" type="button" aria-label="Close settings" onClick={onClose} />
+      <aside className="relative flex h-full w-full max-w-5xl flex-col border-l border-slate-200 bg-white shadow-2xl">
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 px-4">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+              Settings
+            </p>
+            <h2 className="truncate text-base font-semibold text-slate-950">
+              Workspace controls
+            </h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" size="sm" disabled={isBusy} onClick={() => void refresh()}>
+              <RefreshCw className="size-3.5" />
+              Refresh
+            </Button>
+            <Button type="button" variant="ghost" size="icon-sm" aria-label="Close settings" onClick={onClose}>
+              <X className="size-4" />
+            </Button>
+          </div>
+        </header>
 
-        <nav className="settings-section-nav" aria-label="Settings sections">
-          {settingsSections.map((section) => (
-            <button
-              key={section.id}
-              className={`settings-section-link ${
-                activeSection === section.id ? "settings-section-link-active" : ""
-              }`}
-              type="button"
-              onClick={() => setActiveSection(section.id)}
-            >
-              <span>{section.label}</span>
-              <small>{section.description}</small>
-            </button>
-          ))}
-        </nav>
-      </aside>
+        <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)]">
+          <nav className="min-h-0 border-r border-slate-200 bg-slate-50/70 p-2" aria-label="Settings panels">
+            <div className="grid gap-1">
+              {panels.map((panel) => (
+                <button
+                  key={panel.id}
+                  type="button"
+                  className={[
+                    "grid cursor-pointer gap-0.5 rounded-lg px-3 py-2 text-left transition-colors",
+                    activePanel === panel.id
+                      ? "bg-white text-slate-950 shadow-sm ring-1 ring-slate-200"
+                      : "text-slate-600 hover:bg-white/80 hover:text-slate-950",
+                  ].join(" ")}
+                  onClick={() => setActivePanel(panel.id)}
+                >
+                  <span className="text-sm font-medium">{panel.label}</span>
+                  <span className="truncate text-xs text-slate-500">{panel.description}</span>
+                </button>
+              ))}
+            </div>
+          </nav>
 
-      <div className="settings-content">
-        {activeSection === "workspace" ? (
-          <>
-            <section className="panel settings-hero">
-              <div className="panel-header">
-                <div>
-                  <p className="eyebrow">Workspace</p>
-                  <h2>Local-first defaults</h2>
-                  <p>
-                    Tune the app for fast lecture capture on your current machine.
-                  </p>
-                </div>
-                <Settings2 size={18} />
-              </div>
+          <div className="min-h-0 overflow-y-auto p-4">
+            {error ? (
+              <p className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {error}
+              </p>
+            ) : null}
 
-              <div className="summary-grid compact-summary-grid">
-                <div>
-                  <dt>Preferred model</dt>
-                  <dd>{preferredModelLabel ?? "Auto-detect recommended"}</dd>
-                </div>
-                <div>
-                  <dt>Language</dt>
-                  <dd>{transcriptionSettings.preferredLanguage}</dd>
-                </div>
-                <div>
-                  <dt>Installed models</dt>
-                  <dd>{installedCount}</dd>
-                </div>
-              </div>
-            </section>
-
-            <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <h2>Recommended setup</h2>
-                  <p>Use these defaults as a stable baseline across macOS and Windows.</p>
-                </div>
-              </div>
-
-              <PanelList
-                rows={[
-                  {
-                    label: "Default model",
-                    value: recommendedModel?.label ?? "No recommendation available",
-                  },
-                  {
-                    label: "Prompt terms",
-                    value: transcriptionSettings.promptTerms.trim()
-                      ? "Custom lecture prompt is enabled"
-                      : "No custom prompt terms configured",
-                  },
-                  {
-                    label: "Storage mode",
-                    value: "Sessions and models stay local to this device",
-                  },
-                ]}
-              />
-            </section>
-          </>
-        ) : null}
-
-        {activeSection === "transcription" ? (
-          <>
-            <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <p className="eyebrow">Transcription</p>
-                  <h2>Recognition defaults</h2>
-                  <p>Set language hints and what the model should expect from lecture audio.</p>
-                </div>
-                <Languages size={18} />
-              </div>
-
-              <PanelList
-                rows={[
-                  {
-                    label: "Preferred model",
-                    value: preferredModelLabel ?? "Auto-detect recommended",
-                  },
-                  {
-                    label: "Language",
-                    value: transcriptionSettings.preferredLanguage,
-                  },
-                ]}
-              />
-
-              <div className="stack">
-                <label className="field">
-                  <span>Language</span>
-                  <input
-                    value={transcriptionSettings.preferredLanguage}
-                    onChange={(event) => {
-                      void updateSettings({
-                        preferredLanguage: event.target.value.trim() || "auto",
-                      });
-                    }}
-                    disabled={!settingsLoaded}
-                    placeholder="ja"
+            {activePanel === "overview" ? (
+              <div className="space-y-3">
+                <SectionHeader
+                  title="Runtime health"
+                  detail="Dependency checks and app data status."
+                  icon={
+                    runtimeStatus?.issues.length ? (
+                      <AlertTriangle className="size-4 text-amber-600" />
+                    ) : (
+                      <CheckCircle2 className="size-4 text-emerald-600" />
+                    )
+                  }
+                />
+                <div className="grid gap-2 md:grid-cols-4">
+                  <Stat
+                    label="App data"
+                    value={runtimeStatus?.isAppDataWritable ? "Writable" : "Blocked"}
+                    detail={runtimeStatus?.appDataDir}
                   />
-                </label>
-
-                <label className="field">
-                  <span>Prompt terms</span>
-                  <input
-                    value={transcriptionSettings.promptTerms}
-                    onChange={(event) => {
-                      void updateSettings({ promptTerms: event.target.value });
-                    }}
-                    disabled={!settingsLoaded}
-                    placeholder="これは大学の講義の書き起こしです。自然な日本語の句読点..."
+                  <Stat
+                    label="ffmpeg"
+                    value={runtimeStatus?.ffmpegAvailable ? "Available" : "Missing"}
+                    detail={runtimeStatus?.ffmpegPath ?? undefined}
                   />
-                </label>
-              </div>
-            </section>
-
-            <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <h2>Behavior notes</h2>
-                  <p>These settings affect both imported media and live capture transcription.</p>
+                  <Stat
+                    label="whisper-cli"
+                    value={runtimeStatus?.whisperAvailable ? "Available" : "Missing"}
+                    detail={runtimeStatus?.whisperCliPath ?? undefined}
+                  />
+                  <Stat label="Active tasks" value={String(activeTaskCount)} detail={`${tasks.length} tracked`} />
                 </div>
-                <Sparkles size={18} />
-              </div>
-
-              <PanelList
-                rows={[
-                  {
-                    label: "Imported audio",
-                    value: "Normalized locally, then transcribed in the background",
-                  },
-                  {
-                    label: "Live sessions",
-                    value: "Refresh draft transcript during capture, finalize after stop",
-                  },
-                  {
-                    label: "Polishing",
-                    value: "Generates a cleaned share-ready transcript from saved segments",
-                  },
-                ]}
-              />
-            </section>
-          </>
-        ) : null}
-
-        {activeSection === "models" ? (
-          <>
-            <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <p className="eyebrow">Models</p>
-                  <h2>Model manager</h2>
-                  <p>Download and switch local Whisper models stored in the app data directory.</p>
+                {runtimeStatus?.issues.length ? (
+                  <div className="grid gap-2">
+                    {runtimeStatus.issues.map((issue) => (
+                      <p key={issue} className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                        {issue}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="grid gap-2 md:grid-cols-4">
+                  <Stat label="Storage" value={formatBytes(resourceOverview?.totalBytes ?? 0)} detail="App data total" />
+                  <Stat label="Sessions" value={formatBytes(resourceOverview?.sessionBytes ?? 0)} />
+                  <Stat label="Models" value={formatBytes(resourceOverview?.modelBytes ?? 0)} />
+                  <Stat label="Processed" value={formatBytes(resourceOverview?.processedBytes ?? 0)} />
                 </div>
-                <Workflow size={18} />
-              </div>
-
-              <PanelList
-                rows={[
-                  {
-                    label: "Installed",
-                    value: String(installedCount),
-                  },
-                  {
-                    label: "Preferred",
-                    value: preferredModelLabel ?? "Auto-detect recommended",
-                  },
-                  {
-                    label: "Recommended",
-                    value: recommendedModel?.label ?? "No recommendation available",
-                  },
-                ]}
-              />
-            </section>
-
-            {isLoading ? <div className="empty-state">Loading models...</div> : null}
-
-            {!isLoading ? (
-              <div className="session-list">
-                {models.map((model) => {
-                  const isPreferred = transcriptionSettings.preferredModelId === model.id;
-                  const canDelete = model.installed && model.managedByApp;
-                  const progress = progressLabel(model);
-
-                  return (
-                    <section key={model.id} className="session-card model-card">
-                      <div className="session-card-header">
-                        <div>
-                          <h3>
-                            {model.label}
-                            {model.recommended ? " · Recommended" : ""}
-                          </h3>
-                          <p>{model.id}</p>
-                        </div>
-                        <span
-                          className={`status-badge ${
-                            model.installed ? "status-done" : "status-idle"
-                          }`}
-                        >
-                          {model.installed ? "installed" : model.downloadStatus}
-                        </span>
-                      </div>
-
-                      <PanelList
-                        rows={[
-                          {
-                            label: "Size",
-                            value: formatBytes(model.sizeBytes),
-                          },
-                          {
-                            label: "Status",
-                            value: progress ?? model.downloadStatus,
-                          },
-                          ...(model.installedPath
-                            ? [{ label: "Path", value: model.installedPath }]
-                            : []),
-                          {
-                            label: "Source",
-                            value: model.managedByApp ? "App-managed" : "Bundled / external",
-                          },
-                        ]}
-                      />
-
-                      <div className="button-row">
-                        <button
-                          className="primary-button"
-                          type="button"
-                          disabled={!model.installed || isPreferred}
-                          onClick={() => void updateSettings({ preferredModelId: model.id })}
-                        >
-                          {isPreferred ? "Selected" : "Use this model"}
-                        </button>
-
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          disabled={
-                            model.installed ||
-                            model.downloadStatus === "downloading" ||
-                            busyModelId === model.id
-                          }
-                          onClick={() => void handleDownload(model.id)}
-                        >
-                          <Download className="button-icon" size={16} />
-                          {model.downloadStatus === "downloading"
-                            ? "Downloading..."
-                            : "Download"}
-                        </button>
-
-                        {canDelete ? (
-                          <button
-                            className="ghost-button"
-                            type="button"
-                            disabled={busyModelId === model.id}
-                            onClick={() => void handleDelete(model.id)}
-                          >
-                            <Trash2 className="button-icon" size={16} />
-                            Remove
-                          </button>
-                        ) : null}
-                      </div>
-                    </section>
-                  );
-                })}
               </div>
             ) : null}
-          </>
-        ) : null}
 
-        {error ? <p className="error-banner">{error}</p> : null}
-      </div>
+            {activePanel === "transcription" ? (
+              <div className="space-y-3">
+                <SectionHeader
+                  title="Transcription defaults"
+                  detail="Quality preset, language hints, chunking, and CPU use."
+                  icon={<SlidersHorizontal className="size-4" />}
+                />
+                <div className="flex flex-wrap gap-2">
+                  {(Object.keys(presetLabels) as ProcessingQualityPreset[]).map((preset) => (
+                    <Button
+                      key={preset}
+                      type="button"
+                      variant={processingSettings.qualityPreset === preset ? "default" : "outline"}
+                      size="sm"
+                      disabled={!settingsLoaded}
+                      onClick={() => void updateSettings({ qualityPreset: preset })}
+                    >
+                      {presetLabels[preset]}
+                    </Button>
+                  ))}
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium text-slate-700">Language</span>
+                    <input
+                      className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
+                      value={processingSettings.language}
+                      onChange={(event) => void updateSettings({ language: event.target.value.trim() || "auto" })}
+                      disabled={!settingsLoaded}
+                    />
+                  </label>
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium text-slate-700">Preferred model</span>
+                    <select
+                      className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
+                      value={processingSettings.preferredModelId ?? ""}
+                      onChange={(event) =>
+                        void updateSettings({ preferredModelId: event.target.value || null })
+                      }
+                      disabled={!settingsLoaded}
+                    >
+                      <option value="">Preset default</option>
+                      {models.filter((model) => model.installed).map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium text-slate-700">Prompt terms</span>
+                  <input
+                    className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
+                    value={processingSettings.promptTerms}
+                    onChange={(event) => void updateSettings({ promptTerms: event.target.value })}
+                    disabled={!settingsLoaded}
+                  />
+                </label>
+                <div className="grid gap-2 md:grid-cols-4">
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium text-slate-700">Chunk minutes</span>
+                    <input
+                      className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={processingSettings.chunkDurationMinutes}
+                      onChange={(event) =>
+                        void updateSettings({
+                          qualityPreset: "custom",
+                          chunkDurationMinutes: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium text-slate-700">Overlap seconds</span>
+                    <input
+                      className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
+                      type="number"
+                      min={0}
+                      max={120}
+                      value={processingSettings.chunkOverlapSeconds}
+                      onChange={(event) =>
+                        void updateSettings({
+                          qualityPreset: "custom",
+                          chunkOverlapSeconds: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium text-slate-700">Whisper threads</span>
+                    <input
+                      className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
+                      type="number"
+                      min={1}
+                      max={16}
+                      value={processingSettings.whisperThreads ?? ""}
+                      placeholder="Auto"
+                      onChange={(event) =>
+                        void updateSettings({
+                          qualityPreset: "custom",
+                          whisperThreads: event.target.value ? Number(event.target.value) : null,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium text-slate-700">Live refresh</span>
+                    <input
+                      className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
+                      type="number"
+                      min={2}
+                      max={30}
+                      value={processingSettings.liveRefreshIntervalSeconds}
+                      onChange={(event) =>
+                        void updateSettings({
+                          qualityPreset: "custom",
+                          liveRefreshIntervalSeconds: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : null}
+
+            {activePanel === "models" ? (
+              <div className="space-y-3">
+                <SectionHeader
+                  title="Model manager"
+                  detail={`${installedCount} installed. Preferred: ${preferredModelLabel}.`}
+                  icon={<Gauge className="size-4" />}
+                />
+                <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white">
+                  {models.map((model) => {
+                    const isPreferred = processingSettings.preferredModelId === model.id;
+                    const canDelete = model.installed && model.managedByApp;
+                    const total = model.totalBytes ?? model.sizeBytes;
+                    const progress = total ? Math.round((model.downloadedBytes / total) * 100) : 0;
+                    return (
+                      <div key={model.id} className="grid gap-3 p-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            <p className="truncate text-sm font-semibold text-slate-950">
+                              {model.label}
+                            </p>
+                            {model.recommended ? (
+                              <Badge variant="outline" className="rounded-md border-teal-200 bg-teal-50 px-1.5 text-[10px] text-teal-700">
+                                Recommended
+                              </Badge>
+                            ) : null}
+                            <span className="text-xs text-slate-500">{formatBytes(model.sizeBytes)}</span>
+                          </div>
+                          <p className="mt-1 truncate text-xs text-slate-500">{model.installedPath ?? model.id}</p>
+                          {model.downloadStatus === "downloading" ? (
+                            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                              <div className="h-full rounded-full bg-slate-950" style={{ width: `${progress}%` }} />
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={!model.installed || isPreferred}
+                            onClick={() => void updateSettings({ preferredModelId: model.id })}
+                          >
+                            {isPreferred ? "Selected" : "Use"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={model.installed || model.downloadStatus === "downloading" || isBusy}
+                            onClick={() => void handleDownload(model.id)}
+                          >
+                            <Download className="size-3.5" />
+                            Download
+                          </Button>
+                          {canDelete ? (
+                            <Button
+                              type="button"
+                              variant="destructive"
+                              size="icon-sm"
+                              title="Delete model"
+                              onClick={() => void handleDeleteModel(model.id)}
+                            >
+                              <Trash2 className="size-3.5" />
+                            </Button>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+
+            {activePanel === "storage" ? (
+              <div className="space-y-3">
+                <SectionHeader
+                  title="App resources"
+                  detail="Only Leclog-owned files are shown here."
+                  icon={<HardDrive className="size-4" />}
+                />
+                <div className="grid gap-2 md:grid-cols-4">
+                  <Stat label="Total" value={formatBytes(resourceOverview?.totalBytes ?? 0)} />
+                  <Stat label="Sessions" value={formatBytes(resourceOverview?.sessionBytes ?? 0)} />
+                  <Stat label="Models" value={formatBytes(resourceOverview?.modelBytes ?? 0)} />
+                  <Stat label="Temp" value={formatBytes(resourceOverview?.tempBytes ?? 0)} />
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-white px-3">
+                  {modelResources.length === 0 ? (
+                    <p className="py-3 text-sm text-slate-500">No app-level model resources yet.</p>
+                  ) : (
+                    modelResources.map((resource) => (
+                      <ResourceLine
+                        key={resource.id}
+                        resource={resource}
+                        onCopy={(path) => void handleCopy(path)}
+                        onReveal={(path) => void handleReveal(path)}
+                        onDelete={(nextResource) => void handleDeleteResource(nextResource)}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {activePanel === "tasks" ? (
+              <div className="space-y-3">
+                <SectionHeader
+                  title="Background tasks"
+                  detail="Downloads, transcription, retry, and cancellation."
+                  icon={<Workflow className="size-4" />}
+                />
+                <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white">
+                  {tasks.length === 0 ? (
+                    <p className="p-3 text-sm text-slate-500">No background tasks in this app run.</p>
+                  ) : (
+                    tasks.map((task) => (
+                      <div key={task.id} className="grid gap-3 p-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <p className="truncate text-sm font-semibold text-slate-950">{task.title}</p>
+                            <Badge variant="outline" className={taskStatusClass(task.status)}>
+                              {task.status}
+                            </Badge>
+                          </div>
+                          <p className="mt-1 text-xs text-slate-500">
+                            {task.step} · {Math.round(task.percent)}% · {formatDate(task.updatedAt)}
+                          </p>
+                          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                            <div className="h-full rounded-full bg-slate-950" style={{ width: `${Math.max(0, Math.min(100, task.percent))}%` }} />
+                          </div>
+                          {task.error ? <p className="mt-2 text-xs text-red-700">{task.error}</p> : null}
+                        </div>
+                        {task.cancelable && isActiveTask(task) ? (
+                          <Button type="button" variant="outline" size="sm" onClick={() => void handleCancelTask(task.id)}>
+                            <XCircle className="size-3.5" />
+                            Cancel
+                          </Button>
+                        ) : null}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {activePanel === "gaps" ? (
+              <div className="space-y-3">
+                <SectionHeader
+                  title="Product gaps"
+                  detail="The parts that still need product and engineering follow-through."
+                  icon={<ListChecks className="size-4" />}
+                />
+                <div className="grid gap-2">
+                  {productGaps.map((gap) => (
+                    <div key={gap.title} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                      <p className="text-sm font-semibold text-slate-950">{gap.title}</p>
+                      <p className="mt-1 text-sm text-slate-500">{gap.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </aside>
     </div>
   );
 }

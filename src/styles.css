@@ -322,13 +322,13 @@ a {
 
 .page-grid {
   display: grid;
-  gap: 18px;
-  grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+  gap: 12px;
+  grid-template-columns: minmax(292px, 340px) minmax(0, 1fr);
   align-items: start;
 }
 
 .recording-layout {
-  grid-template-columns: minmax(320px, 372px) minmax(0, 1fr);
+  grid-template-columns: minmax(292px, 336px) minmax(0, 1fr);
 }
 
 .settings-layout {
@@ -366,6 +366,31 @@ a {
   padding: 18px;
 }
 
+.session-side-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-bg-panel);
+  box-shadow: var(--app-shadow-sm);
+  backdrop-filter: blur(14px);
+}
+
+.transcript-panel {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 10px;
+}
+
+.transcript-panel .ghost-button {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 0.86rem;
+}
+
 .panel-header,
 .session-card-header {
   display: flex;
@@ -373,6 +398,115 @@ a {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 16px;
+}
+
+.session-topline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.session-title-stack {
+  min-width: 0;
+}
+
+.session-title-stack h2 {
+  margin: 1px 0 0;
+  overflow: hidden;
+  color: #162232;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-stats-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+
+.session-stats-strip div {
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid rgba(74, 96, 122, 0.1);
+  border-radius: 8px;
+  background: rgba(246, 249, 253, 0.76);
+}
+
+.session-stats-strip dt {
+  overflow: hidden;
+  color: var(--app-text-muted);
+  font-size: 0.67rem;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.session-stats-strip dd {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: #1d2b38;
+  font-size: 0.82rem;
+  font-weight: 650;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-command-bar {
+  display: grid;
+  gap: 5px;
+  padding: 7px;
+  border: 1px solid rgba(74, 96, 122, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.session-command-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-command-row .control-bar {
+  gap: 6px;
+  flex: none;
+}
+
+.session-command-row .primary-button,
+.session-command-row .secondary-button,
+.session-command-row .ghost-button {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 0.86rem;
+}
+
+.session-inline-note {
+  margin: 0;
+  overflow: hidden;
+  color: var(--app-text-muted);
+  font-size: 0.76rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-back-link {
+  justify-self: start;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 0.86rem;
 }
 
 .panel-header p,
@@ -752,6 +886,13 @@ a {
   color: #177245;
 }
 
+.session-topline .status-badge {
+  min-width: 78px;
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 0.72rem;
+}
+
 .workspace-transcript-scroll,
 .workspace-sessions-scroll {
   height: 220px;
@@ -814,6 +955,58 @@ a {
   color: var(--app-text-muted);
 }
 
+.mini-audio-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 128px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 7px;
+  border: 1px solid rgba(74, 96, 122, 0.12);
+  border-radius: 8px;
+  background: rgba(246, 249, 253, 0.82);
+  color: var(--app-text-muted);
+  line-height: 1;
+}
+
+.mini-audio-meter-label,
+.mini-audio-meter-value {
+  flex: none;
+  font-size: 0.69rem;
+  font-weight: 700;
+}
+
+.mini-audio-meter-value {
+  width: 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.mini-audio-meter-bars {
+  display: flex;
+  flex: 1;
+  align-items: end;
+  gap: 2px;
+  min-width: 0;
+  height: 16px;
+}
+
+.mini-audio-meter-bar {
+  flex: 1;
+  min-width: 2px;
+  border-radius: 999px;
+  background: rgba(92, 113, 134, 0.22);
+  transition:
+    background-color 0.18s ease,
+    transform 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.mini-audio-meter-bar-active {
+  background: linear-gradient(180deg, #1b63db 0%, #45b36b 100%);
+}
+
 .audio-meter {
   display: flex;
   align-items: end;
@@ -841,6 +1034,19 @@ a {
 
 .helper-text {
   font-size: 0.92rem;
+}
+
+.session-resources-panel {
+  min-width: 0;
+  border: 1px solid rgba(74, 96, 122, 0.12);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.session-side-panel .error-banner {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.84rem;
 }
 
 .empty-state,

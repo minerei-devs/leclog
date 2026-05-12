@@ -1,10 +1,10 @@
 import { useEffect, useRef } from "react";
 import { queueLiveTranscriptRefresh } from "../lib/tauri";
-import type { LectureSession, TranscriptionSettings } from "../types/session";
+import type { LectureSession, ProcessingSettings, TranscriptionSettings } from "../types/session";
 
 interface UseLiveTranscriptOptions {
   session: LectureSession | null;
-  settings: Partial<TranscriptionSettings>;
+  settings: Partial<TranscriptionSettings & ProcessingSettings>;
   onSessionUpdate: (session: LectureSession) => void;
   onError: (message: string) => void;
 }

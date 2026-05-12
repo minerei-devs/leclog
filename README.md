@@ -20,6 +20,9 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
 - Local microphone or macOS system-audio capture
 - Local transcript generation after stop using `whisper.cpp`
 - Session detail page
+- Session-level resource manager plus a Settings sheet for app resources, models, storage, and background tasks
+- Observable model downloads and transcription jobs with progress and cancellation
+- Processing quality presets, chunked transcription, and configurable Whisper thread count
 - Local persistence without a database
 
 ## Run
@@ -59,6 +62,36 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
    ```bash
    pnpm tauri dev
    ```
+
+## Runtime health
+
+The app now exposes runtime checks in the Settings sheet:
+
+- app local data directory is writable
+- `ffmpeg` can be resolved from the bundled sidecar, `LECLOG_FFMPEG_PATH`, or `PATH`
+- `whisper-cli` can be resolved from `LECLOG_WHISPER_PATH`, Homebrew paths, or `PATH`
+- at least one local Whisper model is available
+- interrupted `processing` sessions and partial model downloads are visible
+
+If `whisper-cli` or a model is missing, recording and imports still create local session files, but final transcription tasks fail with a recoverable error. Install a model from Settings or place one under `src-tauri/models/`, then use the session detail resource manager to reprocess.
+
+## Resources and processing
+
+The session detail view manages per-session resources. The Settings sheet manages app-level resources under the app local data directory:
+
+- session folders and captured audio segments
+- normalized audio and transcript artifacts
+- app-managed Whisper models and partial downloads
+- current background tasks
+
+Deletion is restricted to managed app resources. Imported source files outside the app data directory are never deleted.
+
+Processing settings are available from Settings:
+
+- `Fast`: smaller model preference and shorter chunks
+- `Balanced`: default preset for stable local transcription
+- `Accurate`: larger model preference and wider overlap
+- `Custom`: manual chunk length, overlap, thread count, and refresh interval
 
 ## Release
 

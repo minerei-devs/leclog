@@ -1,10 +1,18 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
+
 use chrono::{DateTime, Utc};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
     models::{
-        CaptureSource, LectureSession, ManagedTranscriptionModel, SessionStatus, TranscriptPhase,
+        BackgroundTask, BackgroundTaskKind, CaptureSource, LectureSession,
+        ManagedTranscriptionModel, ProcessingQualityPreset, ProcessingSettings, ResourceItem,
+        ResourceKind, ResourceOverview, RuntimeStatus, SessionStatus, TranscriptPhase,
         TranscriptSegment, TranscriptionModelInfo,
     },
     state::{
@@ -93,29 +101,120 @@ fn persist_snapshot(app: &AppHandle, snapshot: &[LectureSession]) -> std::result
         .map_err(|error| format!("Failed to persist sessions: {error}"))
 }
 
-fn spawn_final_transcription_job(
+#[allow(clippy::too_many_arguments)]
+fn resolve_processing_settings(
     app: &AppHandle,
-    session_id: &str,
-    processing: LectureSession,
     preferred_model_id: Option<String>,
     preferred_language: Option<String>,
     prompt_terms: Option<String>,
+    quality_preset: Option<String>,
+    chunk_duration_minutes: Option<u32>,
+    chunk_overlap_seconds: Option<u32>,
+    whisper_threads: Option<u32>,
+    max_parallel_chunks: Option<u32>,
+    live_refresh_interval_seconds: Option<u32>,
+) -> ProcessingSettings {
+    let mut settings = storage::load_processing_settings(app).unwrap_or_default();
+
+    if let Some(quality_preset) = quality_preset {
+        if let Ok(parsed) = ProcessingQualityPreset::parse(&quality_preset) {
+            settings.quality_preset = parsed;
+        }
+    }
+    if let Some(preferred_model_id) = preferred_model_id {
+        settings.preferred_model_id = Some(preferred_model_id);
+    }
+    if let Some(preferred_language) = preferred_language {
+        settings.language = preferred_language;
+    }
+    if let Some(prompt_terms) = prompt_terms {
+        settings.prompt_terms = prompt_terms;
+    }
+    if let Some(chunk_duration_minutes) = chunk_duration_minutes {
+        settings.chunk_duration_minutes = chunk_duration_minutes;
+    }
+    if let Some(chunk_overlap_seconds) = chunk_overlap_seconds {
+        settings.chunk_overlap_seconds = chunk_overlap_seconds;
+    }
+    if let Some(whisper_threads) = whisper_threads {
+        settings.whisper_threads = Some(whisper_threads);
+    }
+    if let Some(max_parallel_chunks) = max_parallel_chunks {
+        settings.max_parallel_chunks = max_parallel_chunks;
+    }
+    if let Some(live_refresh_interval_seconds) = live_refresh_interval_seconds {
+        settings.live_refresh_interval_seconds = live_refresh_interval_seconds;
+    }
+
+    storage::normalize_processing_settings(settings)
+}
+
+pub(crate) fn spawn_final_transcription_job(
+    app: &AppHandle,
+    session_id: &str,
+    processing: LectureSession,
+    settings: ProcessingSettings,
+    task: BackgroundTask,
 ) {
     let app_handle = app.clone();
     let job_session_id = session_id.to_string();
+    let task_id = task.id.clone();
 
     std::thread::spawn(move || {
+        loop {
+            let task_state = app_handle.state::<TranscriptionTaskState>();
+            if task_state.is_canceled(&task_id).unwrap_or(false) {
+                let _ = task_state.cancel_task(&task_id);
+                let _ = task_state.finish_final(&job_session_id);
+                return;
+            }
+            if task_state.try_acquire_final_worker(&task_id).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+
         let outcome = (|| -> Result<(), String> {
-            storage::normalize_audio_for_transcript(&app_handle, &processing)
+            let task_state = app_handle.state::<TranscriptionTaskState>();
+            task_state
+                .start_task(&task_id, "Normalizing audio")
+                .map_err(|error| format!("Failed to start transcription task: {error}"))?;
+            task_state
+                .progress_task(&task_id, "Normalizing audio", 8.0, None, None, None, None)
+                .ok();
+            storage::normalize_audio_for_transcript(&app_handle, &processing, Some(&task_id))
                 .map_err(|error| format!("Failed to normalize the recorded audio: {error}"))?;
-            let transcribed_segments = storage::transcribe_normalized_audio(
+            task_state
+                .progress_task(&task_id, "Transcribing chunks", 20.0, Some(0), Some(0), None, None)
+                .ok();
+            let transcribed_segments = storage::transcribe_normalized_audio_with_settings(
                 &app_handle,
                 &processing,
-                preferred_model_id.as_deref(),
-                preferred_language.as_deref(),
-                prompt_terms.as_deref(),
+                &settings,
+                Some(&task_id),
+                |completed, total| {
+                    let percent = if total == 0 {
+                        20.0
+                    } else {
+                        20.0 + ((completed as f32 / total as f32) * 68.0)
+                    };
+                    app_handle
+                        .state::<TranscriptionTaskState>()
+                        .progress_task(
+                            &task_id,
+                            "Transcribing chunks",
+                            percent,
+                            Some(completed as u32),
+                            Some(total as u32),
+                            None,
+                            None,
+                        )
+                },
             )
             .map_err(|error| format!("Failed to transcribe the recorded audio: {error}"))?;
+            task_state
+                .progress_task(&task_id, "Polishing transcript", 92.0, None, None, None, None)
+                .ok();
             let polished_transcript_text = storage::polish_transcript_text(&transcribed_segments);
             let (updated, snapshot) = app_handle.state::<SessionState>().mutate(|sessions| {
                 let session = sessions
@@ -151,10 +250,22 @@ fn spawn_final_transcription_job(
                     .map_err(|error| format!("Failed to write polished transcript: {error}"))?;
             }
             persist_snapshot(&app_handle, &snapshot)?;
+            task_state
+                .succeed_task(&task_id, "Transcript ready")
+                .map_err(|error| format!("Failed to complete transcription task: {error}"))?;
             Ok(())
         })();
 
         if let Err(error) = outcome {
+            let task_state = app_handle.state::<TranscriptionTaskState>();
+            if task_state.is_canceled(&task_id).unwrap_or(false)
+                || error.to_ascii_lowercase().contains("canceled")
+            {
+                let _ = task_state.cancel_task(&task_id);
+            } else {
+                let _ = task_state.fail_task(&task_id, error.clone());
+            }
+
             if let Ok((_, snapshot)) = app_handle.state::<SessionState>().mutate(|sessions| {
                 if let Some(session) = sessions.iter_mut().find(|session| session.id == job_session_id)
                 {
@@ -168,6 +279,9 @@ fn spawn_final_transcription_job(
             }
         }
 
+        let _ = app_handle
+            .state::<TranscriptionTaskState>()
+            .release_final_worker(&task_id);
         let _ = app_handle
             .state::<TranscriptionTaskState>()
             .finish_final(&job_session_id);
@@ -267,6 +381,12 @@ pub fn import_media_session(
     preferred_model_id: Option<String>,
     preferred_language: Option<String>,
     prompt_terms: Option<String>,
+    quality_preset: Option<String>,
+    chunk_duration_minutes: Option<u32>,
+    chunk_overlap_seconds: Option<u32>,
+    whisper_threads: Option<u32>,
+    max_parallel_chunks: Option<u32>,
+    live_refresh_interval_seconds: Option<u32>,
 ) -> Result<LectureSession, String> {
     let timestamp = now_iso();
     let mut session = LectureSession {
@@ -308,17 +428,31 @@ pub fn import_media_session(
     })?;
     persist_snapshot(&app, &snapshot)?;
 
-    if !tasks.try_start_final(&created.id)? {
+    let Some(task) = tasks.start_final_task(
+        &created.id,
+        format!("Transcribe imported media: {}", created.title),
+    )? else {
         return Ok(present_session(&created));
-    }
+    };
+    let settings = resolve_processing_settings(
+        &app,
+        preferred_model_id,
+        preferred_language,
+        prompt_terms,
+        quality_preset,
+        chunk_duration_minutes,
+        chunk_overlap_seconds,
+        whisper_threads,
+        max_parallel_chunks,
+        live_refresh_interval_seconds,
+    );
 
     spawn_final_transcription_job(
         &app,
         &created.id,
         created.clone(),
-        preferred_model_id,
-        preferred_language,
-        prompt_terms,
+        settings,
+        task,
     );
 
     Ok(present_session(&created))
@@ -370,6 +504,7 @@ pub fn list_available_transcription_models(
 pub fn download_transcription_model(
     app: AppHandle,
     downloads: State<'_, ModelDownloadState>,
+    tasks: State<'_, TranscriptionTaskState>,
     model_id: String,
 ) -> Result<(), String> {
     let catalog_entry = storage::list_available_transcription_models(&app, &downloads.snapshot()?)
@@ -382,14 +517,83 @@ pub fn download_transcription_model(
         return Ok(());
     }
 
-    if !downloads.start(catalog_entry.clone())? {
+    if downloads
+        .snapshot()?
+        .get(&model_id)
+        .is_some_and(|model| model.download_status == crate::models::ModelDownloadStatus::Downloading)
+    {
         return Ok(());
     }
 
+    let task = tasks.create_task(
+        BackgroundTaskKind::ModelDownload,
+        format!("Download model: {}", catalog_entry.label),
+        None,
+        Some(model_id.clone()),
+        true,
+    )?;
     let app_handle = app.clone();
     let job_model_id = model_id.clone();
+    let task_id = task.id.clone();
     std::thread::spawn(move || {
+        let task_state = app_handle.state::<TranscriptionTaskState>();
+        let _ = task_state.start_task(&task_id, "Waiting for download slot");
+        loop {
+            if task_state.is_canceled(&task_id).unwrap_or(false) {
+                let _ = task_state.cancel_task(&task_id);
+                return;
+            }
+
+            let active_download_count = app_handle
+                .state::<ModelDownloadState>()
+                .snapshot()
+                .map(|jobs| {
+                    jobs.values()
+                        .filter(|job| {
+                            job.download_status
+                                == crate::models::ModelDownloadStatus::Downloading
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            if active_download_count < 2 {
+                match app_handle
+                    .state::<ModelDownloadState>()
+                    .start(catalog_entry.clone())
+                {
+                    Ok(true) => break,
+                    Ok(false) => return,
+                    Err(error) => {
+                        let _ = task_state.fail_task(&task_id, error);
+                        return;
+                    }
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+
+        let _ = task_state.start_task(&task_id, "Downloading model");
         let result = storage::download_transcription_model(&app_handle, &job_model_id, |downloaded_bytes, total_bytes| {
+            let task_state = app_handle.state::<TranscriptionTaskState>();
+            if task_state.is_canceled(&task_id).unwrap_or(false) {
+                return Err(String::from("Task canceled."));
+            }
+            let percent = total_bytes
+                .filter(|total| *total > 0)
+                .map(|total| ((downloaded_bytes as f32 / total as f32) * 100.0).clamp(0.0, 100.0))
+                .unwrap_or(0.0);
+            task_state
+                .progress_task(
+                    &task_id,
+                    "Downloading model",
+                    percent,
+                    None,
+                    None,
+                    Some(downloaded_bytes),
+                    Some(total_bytes),
+                )
+                .ok();
             app_handle
                 .state::<ModelDownloadState>()
                 .progress(&job_model_id, downloaded_bytes, total_bytes)
@@ -401,11 +605,22 @@ pub fn download_transcription_model(
                 let _ = app_handle
                     .state::<ModelDownloadState>()
                     .complete(&job_model_id, path.display().to_string(), total_bytes);
+                let _ = app_handle
+                    .state::<TranscriptionTaskState>()
+                    .succeed_task(&task_id, "Model installed");
             }
             Err(error) => {
                 let _ = app_handle
                     .state::<ModelDownloadState>()
                     .fail(&job_model_id, error.to_string());
+                let task_state = app_handle.state::<TranscriptionTaskState>();
+                if task_state.is_canceled(&task_id).unwrap_or(false)
+                    || error.to_string().to_ascii_lowercase().contains("canceled")
+                {
+                    let _ = task_state.cancel_task(&task_id);
+                } else {
+                    let _ = task_state.fail_task(&task_id, error.to_string());
+                }
             }
         }
     });
@@ -955,11 +1170,13 @@ pub fn save_session(
     preferred_model_id: Option<String>,
     preferred_language: Option<String>,
     prompt_terms: Option<String>,
+    quality_preset: Option<String>,
+    chunk_duration_minutes: Option<u32>,
+    chunk_overlap_seconds: Option<u32>,
+    whisper_threads: Option<u32>,
+    max_parallel_chunks: Option<u32>,
+    live_refresh_interval_seconds: Option<u32>,
 ) -> Result<(), String> {
-    if !tasks.try_start_final(&session_id)? {
-        return Ok(());
-    }
-
     let (processing, snapshot) = state.mutate(|sessions| {
         let session = sessions
             .iter_mut()
@@ -976,14 +1193,646 @@ pub fn save_session(
     })?;
     persist_snapshot(&app, &snapshot)?;
 
+    let Some(task) = tasks.start_final_task(
+        &session_id,
+        format!("Transcribe session: {}", processing.title),
+    )? else {
+        return Ok(());
+    };
+    let settings = resolve_processing_settings(
+        &app,
+        preferred_model_id,
+        preferred_language,
+        prompt_terms,
+        quality_preset,
+        chunk_duration_minutes,
+        chunk_overlap_seconds,
+        whisper_threads,
+        max_parallel_chunks,
+        live_refresh_interval_seconds,
+    );
+
     spawn_final_transcription_job(
         &app,
         &session_id,
         processing,
-        preferred_model_id,
-        preferred_language,
-        prompt_terms,
+        settings,
+        task,
     );
 
     Ok(())
+}
+
+fn command_available(path: &Path, help_arg: &str) -> bool {
+    if path.exists() {
+        return true;
+    }
+
+    Command::new(path)
+        .arg(help_arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+pub fn get_runtime_status(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+) -> Result<RuntimeStatus, String> {
+    let app_data_dir = storage::app_data_dir(&app)
+        .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
+    fs::create_dir_all(&app_data_dir)
+        .map_err(|error| format!("Failed to create app data directory: {error}"))?;
+    let write_probe_path = app_data_dir.join(".leclog-write-check");
+    let is_app_data_writable = fs::write(&write_probe_path, b"ok")
+        .and_then(|_| fs::remove_file(&write_probe_path))
+        .is_ok();
+    let ffmpeg_path = storage::resolve_ffmpeg_path(&app);
+    let whisper_cli_path = storage::resolve_whisper_cli_path(&app);
+    let ffmpeg_available = command_available(&ffmpeg_path, "-version");
+    let whisper_available = command_available(&whisper_cli_path, "--help");
+    let installed_models = storage::list_transcription_models(&app)
+        .map_err(|error| format!("Failed to list transcription models: {error}"))?;
+    let sessions = state.clone_sessions()?;
+    let processing_session_count = sessions
+        .iter()
+        .filter(|session| session.status == SessionStatus::Processing)
+        .count();
+    let partial_download_count = storage::list_partial_downloads(&app)
+        .map(|partials| partials.len())
+        .unwrap_or(0);
+    let mut issues = Vec::new();
+
+    if !is_app_data_writable {
+        issues.push(String::from("App local data directory is not writable."));
+    }
+    if !ffmpeg_available {
+        issues.push(String::from("ffmpeg is not available."));
+    }
+    if !whisper_available {
+        issues.push(String::from("whisper-cli is not available."));
+    }
+    if installed_models.is_empty() {
+        issues.push(String::from("No local Whisper model is installed."));
+    }
+    if partial_download_count > 0 {
+        issues.push(format!("{partial_download_count} partial model download(s) remain."));
+    }
+
+    Ok(RuntimeStatus {
+        app_data_dir: app_data_dir.display().to_string(),
+        is_app_data_writable,
+        ffmpeg_path: Some(ffmpeg_path.display().to_string()),
+        ffmpeg_available,
+        whisper_cli_path: Some(whisper_cli_path.display().to_string()),
+        whisper_available,
+        installed_model_count: installed_models.len(),
+        installed_model_labels: installed_models
+            .into_iter()
+            .map(|model| model.label)
+            .collect(),
+        processing_session_count,
+        partial_download_count,
+        issues,
+    })
+}
+
+fn resource_item(
+    kind: ResourceKind,
+    label: String,
+    path: PathBuf,
+    deletable: bool,
+    session_id: Option<String>,
+    model_id: Option<String>,
+    updated_at: Option<String>,
+) -> ResourceItem {
+    let exists = path.exists();
+    let size_bytes = storage::path_size_bytes(&path).unwrap_or(0);
+    let path_value = path.display().to_string();
+
+    ResourceItem {
+        id: format!("{kind:?}:{path_value}"),
+        kind,
+        label,
+        path: path_value,
+        size_bytes,
+        exists,
+        revealable: exists,
+        deletable: deletable && exists,
+        session_id,
+        model_id,
+        updated_at,
+    }
+}
+
+fn clear_deleted_session_resource(session: &mut LectureSession, path: &Path) -> bool {
+    let matches_path = |value: &str| Path::new(value) == path;
+    let original_audio_file_count = session.audio_file_paths.len();
+    session.audio_file_paths.retain(|value| !matches_path(value));
+    let mut matched = session.audio_file_paths.len() != original_audio_file_count;
+
+    if session
+        .active_audio_file_path
+        .as_deref()
+        .is_some_and(|value| matches_path(value))
+    {
+        session.active_audio_file_path = None;
+        matched = true;
+    }
+    if session
+        .normalized_audio_path
+        .as_deref()
+        .is_some_and(|value| matches_path(value))
+    {
+        session.normalized_audio_path = None;
+        matched = true;
+    }
+    if session
+        .live_preview_audio_path
+        .as_deref()
+        .is_some_and(|value| matches_path(value))
+    {
+        session.live_preview_audio_path = None;
+        session.live_preview_sample_rate = None;
+        matched = true;
+    }
+    if session
+        .processed_transcript_path
+        .as_deref()
+        .is_some_and(|value| matches_path(value))
+    {
+        session.processed_transcript_path = None;
+        matched = true;
+    }
+    if session
+        .polished_transcript_path
+        .as_deref()
+        .is_some_and(|value| matches_path(value))
+    {
+        session.polished_transcript_path = None;
+        session.polished_transcript_text = None;
+        matched = true;
+    }
+
+    if session.audio_file_paths.is_empty() && session.active_audio_file_path.is_none() {
+        session.audio_mime_type = None;
+    }
+    if matched {
+        session.updated_at = now_iso();
+    }
+
+    matched
+}
+
+#[tauri::command]
+pub fn list_resources(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    downloads: State<'_, ModelDownloadState>,
+) -> Result<ResourceOverview, String> {
+    let app_data_dir = storage::app_data_dir(&app)
+        .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
+    let sessions_dir = storage::sessions_root_dir(&app)
+        .map_err(|error| format!("Failed to resolve sessions directory: {error}"))?;
+    let models_dir = storage::app_models_dir(&app)
+        .map_err(|error| format!("Failed to resolve models directory: {error}"))?;
+    let mut resources = vec![resource_item(
+        ResourceKind::AppData,
+        String::from("App local data"),
+        app_data_dir.clone(),
+        false,
+        None,
+        None,
+        None,
+    )];
+    let mut processed_bytes = 0u64;
+
+    for session in state.clone_sessions()? {
+        let Some(session_dir) = session.session_dir.as_ref().map(PathBuf::from) else {
+            continue;
+        };
+        resources.push(resource_item(
+            ResourceKind::SessionDir,
+            session.title.clone(),
+            session_dir.clone(),
+            true,
+            Some(session.id.clone()),
+            None,
+            Some(session.updated_at.clone()),
+        ));
+
+        for (index, path) in session.audio_file_paths.iter().enumerate() {
+            resources.push(resource_item(
+                ResourceKind::Audio,
+                format!("{} capture {}", session.title, index + 1),
+                PathBuf::from(path),
+                false,
+                Some(session.id.clone()),
+                None,
+                Some(session.updated_at.clone()),
+            ));
+        }
+
+        for (kind, label, path) in [
+            (
+                ResourceKind::NormalizedAudio,
+                "Normalized audio",
+                session.normalized_audio_path.as_ref(),
+            ),
+            (
+                ResourceKind::LivePreviewAudio,
+                "Live preview audio",
+                session.live_preview_audio_path.as_ref(),
+            ),
+            (
+                ResourceKind::Transcript,
+                "Processed transcript",
+                session.processed_transcript_path.as_ref(),
+            ),
+            (
+                ResourceKind::Transcript,
+                "Polished transcript",
+                session.polished_transcript_path.as_ref(),
+            ),
+        ] {
+            if let Some(path) = path {
+                let path = PathBuf::from(path);
+                if matches!(kind, ResourceKind::NormalizedAudio | ResourceKind::LivePreviewAudio | ResourceKind::Transcript) {
+                    processed_bytes = processed_bytes.saturating_add(storage::path_size_bytes(&path).unwrap_or(0));
+                }
+                resources.push(resource_item(
+                    kind,
+                    format!("{} {label}", session.title),
+                    path,
+                    false,
+                    Some(session.id.clone()),
+                    None,
+                    Some(session.updated_at.clone()),
+                ));
+            }
+        }
+    }
+
+    let download_snapshot = downloads.snapshot()?;
+    for model in storage::list_available_transcription_models(&app, &download_snapshot) {
+        if let Some(path) = model.installed_path.as_ref() {
+            resources.push(resource_item(
+                ResourceKind::Model,
+                model.label,
+                PathBuf::from(path),
+                model.managed_by_app,
+                None,
+                Some(model.id),
+                None,
+            ));
+        }
+    }
+
+    for partial in storage::list_partial_downloads(&app).unwrap_or_default() {
+        resources.push(resource_item(
+            ResourceKind::PartialDownload,
+            partial
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Partial model download")
+                .to_string(),
+            partial,
+            true,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    let total_bytes = storage::path_size_bytes(&app_data_dir).unwrap_or(0);
+    let session_bytes = storage::path_size_bytes(&sessions_dir).unwrap_or(0);
+    let model_bytes = storage::path_size_bytes(&models_dir).unwrap_or(0);
+    let temp_bytes = resources
+        .iter()
+        .filter(|resource| resource.kind == ResourceKind::PartialDownload)
+        .map(|resource| resource.size_bytes)
+        .sum();
+    resources.sort_by(|left, right| left.kind.cmp(&right.kind).then(left.label.cmp(&right.label)));
+
+    Ok(ResourceOverview {
+        app_data_dir: app_data_dir.display().to_string(),
+        total_bytes,
+        session_bytes,
+        model_bytes,
+        processed_bytes,
+        temp_bytes,
+        resources,
+    })
+}
+
+#[tauri::command]
+pub fn delete_resource(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    downloads: State<'_, ModelDownloadState>,
+    path: String,
+    session_id: Option<String>,
+    model_id: Option<String>,
+) -> Result<ResourceOverview, String> {
+    let path = PathBuf::from(path);
+    let app_data_dir = storage::app_data_dir(&app)
+        .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
+    if !storage::is_inside_app_data(&app, &path)
+        .map_err(|error| format!("Failed to validate resource path: {error}"))?
+    {
+        return Err(String::from("Only Leclog app resources can be deleted."));
+    }
+    if path == app_data_dir {
+        return Err(String::from("The app data root cannot be deleted from here."));
+    }
+
+    if let Some(model_id) = model_id.as_deref() {
+        storage::delete_managed_transcription_model(&app, model_id)
+            .map_err(|error| format!("Failed to delete model resource: {error}"))?;
+        downloads.clear(model_id)?;
+    } else if let Some(session_id) = session_id.as_deref() {
+        let expected_session_dir = storage::session_dir_path(&app, session_id)
+            .map_err(|error| format!("Failed to resolve session directory: {error}"))?;
+        if path == expected_session_dir {
+            if path.exists() {
+                fs::remove_dir_all(&path)
+                    .map_err(|error| format!("Failed to delete session directory: {error}"))?;
+            }
+            let (_, snapshot) = state.mutate(|sessions| {
+                sessions.retain(|session| session.id != session_id);
+                Ok(())
+            })?;
+            persist_snapshot(&app, &snapshot)?;
+        } else {
+            let canonical_session_dir = expected_session_dir
+                .canonicalize()
+                .map_err(|error| format!("Failed to validate session directory: {error}"))?;
+            let canonical_path = path
+                .canonicalize()
+                .map_err(|error| format!("Failed to validate session resource: {error}"))?;
+            if !canonical_path.starts_with(canonical_session_dir) || !canonical_path.is_file() {
+                return Err(String::from("Only files inside this session can be deleted."));
+            }
+            let is_tracked_resource = state
+                .clone_sessions()?
+                .into_iter()
+                .find(|candidate| candidate.id == session_id)
+                .map(|mut session| clear_deleted_session_resource(&mut session, &path))
+                .unwrap_or(false);
+            if !is_tracked_resource {
+                return Err(String::from("The selected file is not tracked by this session."));
+            }
+
+            fs::remove_file(&canonical_path)
+                .map_err(|error| format!("Failed to delete session resource: {error}"))?;
+            let (_, snapshot) = state.mutate(|sessions| {
+                let session = sessions
+                    .iter_mut()
+                    .find(|candidate| candidate.id == session_id)
+                    .ok_or_else(|| String::from("Session not found."))?;
+                clear_deleted_session_resource(session, &path);
+                Ok(())
+            })?;
+            persist_snapshot(&app, &snapshot)?;
+        }
+    } else if path.exists() && path.is_file() {
+        fs::remove_file(&path).map_err(|error| format!("Failed to delete resource: {error}"))?;
+    } else {
+        return Err(String::from("Unsupported resource deletion request."));
+    }
+
+    list_resources(app, state, downloads)
+}
+
+#[tauri::command]
+pub fn reveal_resource(app: AppHandle, path: String) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if !storage::is_inside_app_data(&app, &path)
+        .map_err(|error| format!("Failed to validate resource path: {error}"))?
+    {
+        return Err(String::from("Only Leclog app resources can be revealed."));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R", path.to_string_lossy().as_ref()])
+            .status()
+            .map_err(|error| format!("Failed to reveal resource in Finder: {error}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .status()
+            .map_err(|error| format!("Failed to reveal resource in Explorer: {error}"))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if path.is_dir() {
+            path
+        } else {
+            path.parent().map(Path::to_path_buf).unwrap_or(path)
+        };
+        Command::new("xdg-open")
+            .arg(target)
+            .status()
+            .map_err(|error| format!("Failed to reveal resource: {error}"))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_background_tasks(
+    tasks: State<'_, TranscriptionTaskState>,
+) -> Result<Vec<BackgroundTask>, String> {
+    tasks.list_tasks()
+}
+
+#[tauri::command]
+pub fn cancel_background_task(
+    tasks: State<'_, TranscriptionTaskState>,
+    task_id: String,
+) -> Result<BackgroundTask, String> {
+    tasks.cancel_task(&task_id)
+}
+
+#[tauri::command]
+pub fn retry_session_processing(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    tasks: State<'_, TranscriptionTaskState>,
+    session_id: String,
+) -> Result<LectureSession, String> {
+    let (processing, snapshot) = state.mutate(|sessions| {
+        let session = sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
+        if session.audio_file_paths.is_empty() {
+            return Err(String::from("This session does not have any audio files to process."));
+        }
+
+        storage::ensure_session_paths(&app, session)
+            .map_err(|error| format!("Failed to prepare session storage: {error}"))?;
+        session.status = SessionStatus::Processing;
+        session.transcript_phase = TranscriptPhase::Processing;
+        session.transcript_error = None;
+        session.updated_at = now_iso();
+        Ok(session.clone())
+    })?;
+    persist_snapshot(&app, &snapshot)?;
+
+    let Some(task) = tasks.start_final_task(
+        &session_id,
+        format!("Retry transcription: {}", processing.title),
+    )? else {
+        return Ok(present_session(&processing));
+    };
+    let settings = storage::load_processing_settings(&app).unwrap_or_default();
+    spawn_final_transcription_job(&app, &session_id, processing.clone(), settings, task);
+
+    Ok(present_session(&processing))
+}
+
+#[tauri::command]
+pub fn get_processing_settings(app: AppHandle) -> Result<ProcessingSettings, String> {
+    storage::load_processing_settings(&app)
+        .map_err(|error| format!("Failed to load processing settings: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn patch_processing_settings(
+    app: AppHandle,
+    quality_preset: Option<String>,
+    preferred_model_id: Option<String>,
+    clear_preferred_model_id: Option<bool>,
+    language: Option<String>,
+    prompt_terms: Option<String>,
+    chunk_duration_minutes: Option<u32>,
+    chunk_overlap_seconds: Option<u32>,
+    whisper_threads: Option<u32>,
+    clear_whisper_threads: Option<bool>,
+    max_parallel_chunks: Option<u32>,
+    live_refresh_interval_seconds: Option<u32>,
+) -> Result<ProcessingSettings, String> {
+    let mut settings = storage::load_processing_settings(&app).unwrap_or_default();
+    if let Some(quality_preset) = quality_preset {
+        settings.quality_preset = ProcessingQualityPreset::parse(&quality_preset)?;
+    }
+    if clear_preferred_model_id.unwrap_or(false) {
+        settings.preferred_model_id = None;
+    } else if let Some(preferred_model_id) = preferred_model_id {
+        settings.preferred_model_id = Some(preferred_model_id);
+    }
+    if let Some(language) = language {
+        settings.language = language;
+    }
+    if let Some(prompt_terms) = prompt_terms {
+        settings.prompt_terms = prompt_terms;
+    }
+    if let Some(chunk_duration_minutes) = chunk_duration_minutes {
+        settings.chunk_duration_minutes = chunk_duration_minutes;
+    }
+    if let Some(chunk_overlap_seconds) = chunk_overlap_seconds {
+        settings.chunk_overlap_seconds = chunk_overlap_seconds;
+    }
+    if clear_whisper_threads.unwrap_or(false) {
+        settings.whisper_threads = None;
+    } else if let Some(whisper_threads) = whisper_threads {
+        settings.whisper_threads = Some(whisper_threads);
+    }
+    if let Some(max_parallel_chunks) = max_parallel_chunks {
+        settings.max_parallel_chunks = max_parallel_chunks;
+    }
+    if let Some(live_refresh_interval_seconds) = live_refresh_interval_seconds {
+        settings.live_refresh_interval_seconds = live_refresh_interval_seconds;
+    }
+
+    let settings = storage::normalize_processing_settings(settings);
+    storage::persist_processing_settings(&app, &settings)
+        .map_err(|error| format!("Failed to save processing settings: {error}"))?;
+    Ok(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_session() -> LectureSession {
+        LectureSession {
+            id: String::from("session-1"),
+            title: String::from("Session"),
+            created_at: String::from("2026-05-12T00:00:00Z"),
+            updated_at: String::from("2026-05-12T00:00:00Z"),
+            capture_source: CaptureSource::Microphone,
+            status: SessionStatus::Done,
+            duration_ms: 0,
+            segments: Vec::new(),
+            session_dir: Some(String::from("/tmp/session-1")),
+            audio_file_paths: vec![String::from("/tmp/session-1/audio/segment-001.wav")],
+            active_audio_file_path: Some(String::from("/tmp/session-1/audio/segment-001.wav")),
+            audio_mime_type: Some(String::from("audio/wav")),
+            normalized_audio_path: Some(String::from("/tmp/session-1/processed/normalized.wav")),
+            processed_transcript_path: Some(String::from("/tmp/session-1/processed/transcript.txt")),
+            polished_transcript_path: Some(String::from("/tmp/session-1/processed/transcript-polished.txt")),
+            polished_transcript_text: Some(String::from("Polished")),
+            live_preview_audio_path: Some(String::from("/tmp/session-1/processed/live-preview.wav")),
+            live_preview_sample_rate: Some(16_000),
+            transcript_phase: TranscriptPhase::Ready,
+            transcript_error: None,
+            audio_level: None,
+            last_resumed_at: None,
+            capture_target_label: None,
+        }
+    }
+
+    #[test]
+    fn clears_deleted_audio_metadata() {
+        let mut session = test_session();
+
+        let matched = clear_deleted_session_resource(
+            &mut session,
+            Path::new("/tmp/session-1/audio/segment-001.wav"),
+        );
+
+        assert!(matched);
+        assert!(session.audio_file_paths.is_empty());
+        assert!(session.active_audio_file_path.is_none());
+        assert!(session.audio_mime_type.is_none());
+    }
+
+    #[test]
+    fn clears_deleted_polished_transcript_payload() {
+        let mut session = test_session();
+
+        let matched = clear_deleted_session_resource(
+            &mut session,
+            Path::new("/tmp/session-1/processed/transcript-polished.txt"),
+        );
+
+        assert!(matched);
+        assert!(session.polished_transcript_path.is_none());
+        assert!(session.polished_transcript_text.is_none());
+    }
+
+    #[test]
+    fn ignores_untracked_session_resource() {
+        let mut session = test_session();
+
+        let matched = clear_deleted_session_resource(
+            &mut session,
+            Path::new("/tmp/session-1/processed/unknown.tmp"),
+        );
+
+        assert!(!matched);
+        assert!(session.normalized_audio_path.is_some());
+        assert!(session.polished_transcript_text.is_some());
+    }
 }

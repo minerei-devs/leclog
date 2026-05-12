@@ -3,8 +3,18 @@ use std::{
     sync::Mutex,
 };
 
-use crate::models::{LectureSession, ManagedTranscriptionModel, ModelDownloadStatus};
+use chrono::Utc;
+use uuid::Uuid;
+
+use crate::models::{
+    BackgroundTask, BackgroundTaskKind, BackgroundTaskStatus, LectureSession,
+    ManagedTranscriptionModel, ModelDownloadStatus,
+};
 use crate::system_audio::SystemAudioCapture;
+
+fn now_iso() -> String {
+    Utc::now().to_rfc3339()
+}
 
 pub struct SessionState {
     sessions: Mutex<Vec<LectureSession>>,
@@ -101,7 +111,10 @@ impl AudioMeterState {
 #[derive(Default)]
 pub struct TranscriptionTaskState {
     live_jobs: Mutex<HashSet<String>>,
-    final_jobs: Mutex<HashSet<String>>,
+    final_jobs: Mutex<HashMap<String, String>>,
+    final_worker: Mutex<Option<String>>,
+    tasks: Mutex<HashMap<String, BackgroundTask>>,
+    canceled_tasks: Mutex<HashSet<String>>,
 }
 
 impl TranscriptionTaskState {
@@ -122,12 +135,28 @@ impl TranscriptionTaskState {
         Ok(())
     }
 
-    pub fn try_start_final(&self, session_id: &str) -> Result<bool, String> {
+    pub fn start_final_task(
+        &self,
+        session_id: &str,
+        title: String,
+    ) -> Result<Option<BackgroundTask>, String> {
         let mut jobs = self
             .final_jobs
             .lock()
             .map_err(|_| String::from("Failed to acquire final transcription job lock."))?;
-        Ok(jobs.insert(session_id.to_string()))
+        if jobs.contains_key(session_id) {
+            return Ok(None);
+        }
+
+        let task = self.create_task_locked(
+            BackgroundTaskKind::FinalTranscription,
+            title,
+            Some(session_id.to_string()),
+            None,
+            true,
+        )?;
+        jobs.insert(session_id.to_string(), task.id.clone());
+        Ok(Some(task))
     }
 
     pub fn finish_final(&self, session_id: &str) -> Result<(), String> {
@@ -136,6 +165,208 @@ impl TranscriptionTaskState {
             .lock()
             .map_err(|_| String::from("Failed to acquire final transcription job lock."))?;
         jobs.remove(session_id);
+        Ok(())
+    }
+
+    pub fn try_acquire_final_worker(&self, task_id: &str) -> Result<bool, String> {
+        let mut worker = self
+            .final_worker
+            .lock()
+            .map_err(|_| String::from("Failed to acquire final transcription worker lock."))?;
+        if worker.is_none() {
+            *worker = Some(task_id.to_string());
+            return Ok(true);
+        }
+        Ok(worker.as_deref() == Some(task_id))
+    }
+
+    pub fn release_final_worker(&self, task_id: &str) -> Result<(), String> {
+        let mut worker = self
+            .final_worker
+            .lock()
+            .map_err(|_| String::from("Failed to acquire final transcription worker lock."))?;
+        if worker.as_deref() == Some(task_id) {
+            *worker = None;
+        }
+        Ok(())
+    }
+
+    pub fn create_task(
+        &self,
+        kind: BackgroundTaskKind,
+        title: String,
+        session_id: Option<String>,
+        model_id: Option<String>,
+        cancelable: bool,
+    ) -> Result<BackgroundTask, String> {
+        self.create_task_locked(kind, title, session_id, model_id, cancelable)
+    }
+
+    fn create_task_locked(
+        &self,
+        kind: BackgroundTaskKind,
+        title: String,
+        session_id: Option<String>,
+        model_id: Option<String>,
+        cancelable: bool,
+    ) -> Result<BackgroundTask, String> {
+        let timestamp = now_iso();
+        let task = BackgroundTask {
+            id: Uuid::new_v4().to_string(),
+            kind,
+            status: BackgroundTaskStatus::Queued,
+            title,
+            step: String::from("Queued"),
+            percent: 0.0,
+            completed_chunks: 0,
+            total_chunks: 0,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            error: None,
+            session_id,
+            model_id,
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+            cancelable,
+        };
+
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| String::from("Failed to acquire background task lock."))?;
+        tasks.insert(task.id.clone(), task.clone());
+        Ok(task)
+    }
+
+    pub fn list_tasks(&self) -> Result<Vec<BackgroundTask>, String> {
+        let tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| String::from("Failed to acquire background task lock."))?;
+        let mut values = tasks.values().cloned().collect::<Vec<_>>();
+        values.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(values)
+    }
+
+    pub fn start_task(&self, task_id: &str, step: &str) -> Result<(), String> {
+        self.update_task(task_id, |task| {
+            task.status = BackgroundTaskStatus::Running;
+            task.step = step.to_string();
+            task.error = None;
+        })
+    }
+
+    pub fn progress_task(
+        &self,
+        task_id: &str,
+        step: &str,
+        percent: f32,
+        completed_chunks: Option<u32>,
+        total_chunks: Option<u32>,
+        downloaded_bytes: Option<u64>,
+        total_bytes: Option<Option<u64>>,
+    ) -> Result<(), String> {
+        self.update_task(task_id, |task| {
+            task.status = BackgroundTaskStatus::Running;
+            task.step = step.to_string();
+            task.percent = percent.clamp(0.0, 100.0);
+            if let Some(completed_chunks) = completed_chunks {
+                task.completed_chunks = completed_chunks;
+            }
+            if let Some(total_chunks) = total_chunks {
+                task.total_chunks = total_chunks;
+            }
+            if let Some(downloaded_bytes) = downloaded_bytes {
+                task.downloaded_bytes = downloaded_bytes;
+            }
+            if let Some(total_bytes) = total_bytes {
+                task.total_bytes = total_bytes;
+            }
+            task.error = None;
+        })
+    }
+
+    pub fn succeed_task(&self, task_id: &str, step: &str) -> Result<(), String> {
+        self.update_task(task_id, |task| {
+            task.status = BackgroundTaskStatus::Succeeded;
+            task.step = step.to_string();
+            task.percent = 100.0;
+            task.error = None;
+            task.cancelable = false;
+        })?;
+        self.clear_cancellation(task_id)
+    }
+
+    pub fn fail_task(&self, task_id: &str, error: String) -> Result<(), String> {
+        self.update_task(task_id, |task| {
+            task.status = BackgroundTaskStatus::Failed;
+            task.step = String::from("Failed");
+            task.error = Some(error);
+            task.cancelable = false;
+        })?;
+        self.clear_cancellation(task_id)
+    }
+
+    pub fn cancel_task(&self, task_id: &str) -> Result<BackgroundTask, String> {
+        {
+            let mut canceled = self
+                .canceled_tasks
+                .lock()
+                .map_err(|_| String::from("Failed to acquire task cancellation lock."))?;
+            canceled.insert(task_id.to_string());
+        }
+
+        self.update_task(task_id, |task| {
+            task.status = BackgroundTaskStatus::Canceled;
+            task.step = String::from("Canceling");
+            task.error = None;
+            task.cancelable = false;
+        })?;
+
+        self.get_task(task_id)
+    }
+
+    pub fn is_canceled(&self, task_id: &str) -> Result<bool, String> {
+        let canceled = self
+            .canceled_tasks
+            .lock()
+            .map_err(|_| String::from("Failed to acquire task cancellation lock."))?;
+        Ok(canceled.contains(task_id))
+    }
+
+    fn clear_cancellation(&self, task_id: &str) -> Result<(), String> {
+        let mut canceled = self
+            .canceled_tasks
+            .lock()
+            .map_err(|_| String::from("Failed to acquire task cancellation lock."))?;
+        canceled.remove(task_id);
+        Ok(())
+    }
+
+    fn get_task(&self, task_id: &str) -> Result<BackgroundTask, String> {
+        let tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| String::from("Failed to acquire background task lock."))?;
+        tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| format!("Background task with id {task_id} was not found."))
+    }
+
+    fn update_task<F>(&self, task_id: &str, updater: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut BackgroundTask),
+    {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| String::from("Failed to acquire background task lock."))?;
+        let task = tasks
+            .get_mut(task_id)
+            .ok_or_else(|| format!("Background task with id {task_id} was not found."))?;
+        updater(task);
+        task.updated_at = now_iso();
         Ok(())
     }
 }
@@ -243,5 +474,77 @@ impl ModelDownloadState {
             .map_err(|_| String::from("Failed to acquire model download lock."))?;
         jobs.remove(model_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TranscriptionTaskState;
+    use crate::models::{BackgroundTaskKind, BackgroundTaskStatus};
+
+    #[test]
+    fn tracks_background_task_lifecycle() {
+        let state = TranscriptionTaskState::default();
+        let task = state
+            .create_task(
+                BackgroundTaskKind::FinalTranscription,
+                String::from("Transcribe"),
+                Some(String::from("session-1")),
+                None,
+                true,
+            )
+            .expect("task should be created");
+
+        state
+            .start_task(&task.id, "Running")
+            .expect("task should start");
+        state
+            .progress_task(&task.id, "Halfway", 50.0, Some(1), Some(2), None, None)
+            .expect("task should update");
+
+        let task = state
+            .list_tasks()
+            .expect("tasks should list")
+            .into_iter()
+            .find(|candidate| candidate.id == task.id)
+            .expect("task should be listed");
+        assert_eq!(task.status, BackgroundTaskStatus::Running);
+        assert_eq!(task.percent, 50.0);
+        assert_eq!(task.completed_chunks, 1);
+        assert_eq!(task.total_chunks, 2);
+
+        state
+            .succeed_task(&task.id, "Done")
+            .expect("task should complete");
+        let task = state
+            .list_tasks()
+            .expect("tasks should list")
+            .into_iter()
+            .find(|candidate| candidate.id == task.id)
+            .expect("task should be listed");
+        assert_eq!(task.status, BackgroundTaskStatus::Succeeded);
+        assert_eq!(task.percent, 100.0);
+        assert!(!task.cancelable);
+    }
+
+    #[test]
+    fn marks_task_canceled() {
+        let state = TranscriptionTaskState::default();
+        let task = state
+            .create_task(
+                BackgroundTaskKind::ModelDownload,
+                String::from("Download"),
+                None,
+                Some(String::from("ggml-base.bin")),
+                true,
+            )
+            .expect("task should be created");
+
+        let canceled = state
+            .cancel_task(&task.id)
+            .expect("task should cancel");
+
+        assert_eq!(canceled.status, BackgroundTaskStatus::Canceled);
+        assert!(state.is_canceled(&task.id).expect("cancel check should work"));
     }
 }

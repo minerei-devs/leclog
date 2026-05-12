@@ -4,7 +4,9 @@ use std::{
     fs::OpenOptions,
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -13,12 +15,16 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-use crate::models::{
-    LectureSession, ManagedTranscriptionModel, ModelDownloadStatus, SessionStatus,
-    TranscriptSegment, TranscriptionModelInfo,
+use crate::{
+    models::{
+        LectureSession, ManagedTranscriptionModel, ModelDownloadStatus, ProcessingQualityPreset,
+        ProcessingSettings, SessionStatus, TranscriptSegment, TranscriptionModelInfo,
+    },
+    state::TranscriptionTaskState,
 };
 
 const SESSIONS_FILE_NAME: &str = "sessions.json";
+const PROCESSING_SETTINGS_FILE_NAME: &str = "processing-settings.json";
 const SESSIONS_DIR_NAME: &str = "sessions";
 const SESSION_METADATA_FILE_NAME: &str = "session.json";
 const CONCAT_INPUTS_FILE_NAME: &str = "concat-inputs.txt";
@@ -28,6 +34,7 @@ const POLISHED_TRANSCRIPT_FILE_NAME: &str = "transcript-polished.txt";
 const TRANSCRIPT_JSON_FILE_NAME: &str = "transcript.json";
 const LIVE_PREVIEW_AUDIO_FILE_NAME: &str = "live-preview.wav";
 const LIVE_TRANSCRIPT_JSON_FILE_NAME: &str = "live-transcript.json";
+const CHUNKS_DIR_NAME: &str = "chunks";
 const WAV_HEADER_LEN: u64 = 44;
 const DEFAULT_WHISPER_MODEL_FILE_NAMES: [&str; 8] = [
     "ggml-large-v3-turbo.bin",
@@ -56,7 +63,7 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn app_data_dir(app: &AppHandle) -> Result<PathBuf> {
+pub fn app_data_dir(app: &AppHandle) -> Result<PathBuf> {
     app
         .path()
         .app_local_data_dir()
@@ -67,13 +74,81 @@ pub fn app_models_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_data_dir(app)?.join("models"))
 }
 
+fn processing_settings_path(app: &AppHandle) -> Result<PathBuf> {
+    Ok(app_data_dir(app)?.join(PROCESSING_SETTINGS_FILE_NAME))
+}
+
+pub fn load_processing_settings(app: &AppHandle) -> Result<ProcessingSettings> {
+    let path = processing_settings_path(app)?;
+    if !path.exists() {
+        return Ok(ProcessingSettings::default());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read {}.", path.display()))?;
+    let settings = serde_json::from_str::<ProcessingSettings>(&raw).unwrap_or_default();
+    Ok(normalize_processing_settings(settings))
+}
+
+pub fn persist_processing_settings(app: &AppHandle, settings: &ProcessingSettings) -> Result<()> {
+    let path = processing_settings_path(app)?;
+    ensure_parent_dir(&path)?;
+    let payload = serde_json::to_string_pretty(&normalize_processing_settings(settings.clone()))
+        .context("Failed to serialize processing settings.")?;
+    fs::write(path, payload).context("Failed to write processing settings.")?;
+    Ok(())
+}
+
+pub fn normalize_processing_settings(mut settings: ProcessingSettings) -> ProcessingSettings {
+    if settings.language.trim().is_empty() {
+        settings.language = String::from("auto");
+    } else {
+        settings.language = settings.language.trim().to_string();
+    }
+
+    settings.prompt_terms = settings.prompt_terms.trim().to_string();
+    settings.preferred_model_id = settings
+        .preferred_model_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if settings.quality_preset != ProcessingQualityPreset::Custom {
+        match settings.quality_preset {
+            ProcessingQualityPreset::Fast => {
+                settings.chunk_duration_minutes = 5;
+                settings.chunk_overlap_seconds = 10;
+                settings.max_parallel_chunks = 1;
+            }
+            ProcessingQualityPreset::Balanced => {
+                settings.chunk_duration_minutes = 10;
+                settings.chunk_overlap_seconds = 20;
+                settings.max_parallel_chunks = 1;
+            }
+            ProcessingQualityPreset::Accurate => {
+                settings.chunk_duration_minutes = 15;
+                settings.chunk_overlap_seconds = 30;
+                settings.max_parallel_chunks = 1;
+            }
+            ProcessingQualityPreset::Custom => {}
+        }
+    }
+
+    settings.chunk_duration_minutes = settings.chunk_duration_minutes.clamp(1, 60);
+    settings.chunk_overlap_seconds = settings.chunk_overlap_seconds.min(120);
+    settings.max_parallel_chunks = settings.max_parallel_chunks.clamp(1, 4);
+    settings.live_refresh_interval_seconds = settings.live_refresh_interval_seconds.clamp(2, 30);
+    settings.whisper_threads = settings.whisper_threads.filter(|value| *value > 0).map(|value| value.min(16));
+
+    settings
+}
+
 pub fn sessions_file_path(app: &AppHandle) -> Result<PathBuf> {
     let base_dir = app_data_dir(app)?;
 
     Ok(base_dir.join(SESSIONS_FILE_NAME))
 }
 
-fn sessions_root_dir(app: &AppHandle) -> Result<PathBuf> {
+pub fn sessions_root_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_data_dir(app)?.join(SESSIONS_DIR_NAME))
 }
 
@@ -113,6 +188,13 @@ fn transcript_json_path(app: &AppHandle, session_id: &str) -> Result<PathBuf> {
     Ok(session_dir_path(app, session_id)?
         .join("processed")
         .join(TRANSCRIPT_JSON_FILE_NAME))
+}
+
+fn chunk_transcript_json_path(app: &AppHandle, session_id: &str, chunk_index: usize) -> Result<PathBuf> {
+    Ok(session_dir_path(app, session_id)?
+        .join("processed")
+        .join(CHUNKS_DIR_NAME)
+        .join(format!("chunk-{chunk_index:03}.json")))
 }
 
 fn live_transcript_json_path(app: &AppHandle, session_id: &str) -> Result<PathBuf> {
@@ -196,7 +278,7 @@ fn current_target_triple() -> &'static str {
     }
 }
 
-fn resolve_ffmpeg_path(app: &AppHandle) -> PathBuf {
+pub fn resolve_ffmpeg_path(app: &AppHandle) -> PathBuf {
     if let Ok(path) = env::var("LECLOG_FFMPEG_PATH") {
         let candidate = PathBuf::from(path);
         if candidate.exists() {
@@ -228,7 +310,7 @@ fn resolve_ffmpeg_path(app: &AppHandle) -> PathBuf {
     PathBuf::from("ffmpeg")
 }
 
-fn resolve_whisper_cli_path(app: &AppHandle) -> PathBuf {
+pub fn resolve_whisper_cli_path(app: &AppHandle) -> PathBuf {
     if let Ok(path) = env::var("LECLOG_WHISPER_PATH") {
         let candidate = PathBuf::from(path);
         if candidate.exists() {
@@ -352,6 +434,54 @@ pub fn find_model_path_by_id(app: &AppHandle, model_id: &str) -> Option<PathBuf>
     None
 }
 
+fn first_existing_model_id(app: &AppHandle, candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|candidate| find_model_path_by_id(app, candidate).is_some())
+        .map(|candidate| (*candidate).to_string())
+}
+
+fn resolve_preferred_model_for_settings(
+    app: &AppHandle,
+    settings: &ProcessingSettings,
+) -> Option<String> {
+    if let Some(model_id) = settings.preferred_model_id.as_deref() {
+        if find_model_path_by_id(app, model_id).is_some() {
+            return Some(model_id.to_string());
+        }
+    }
+
+    match settings.quality_preset {
+        ProcessingQualityPreset::Fast => {
+            first_existing_model_id(app, &["ggml-base.bin", "ggml-tiny.bin", "ggml-base.en.bin", "ggml-tiny.en.bin"])
+        }
+        ProcessingQualityPreset::Balanced => {
+            first_existing_model_id(app, &["ggml-small.bin", "ggml-base.bin", "ggml-small.en.bin", "ggml-base.en.bin"])
+        }
+        ProcessingQualityPreset::Accurate => first_existing_model_id(
+            app,
+            &[
+                "ggml-large-v3-turbo-q5_0.bin",
+                "ggml-large-v3-turbo.bin",
+                "ggml-small.bin",
+                "ggml-base.bin",
+            ],
+        ),
+        ProcessingQualityPreset::Custom => settings.preferred_model_id.clone(),
+    }
+}
+
+fn resolve_whisper_threads(settings: &ProcessingSettings) -> u32 {
+    if let Some(threads) = settings.whisper_threads {
+        return threads.clamp(1, 16);
+    }
+
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get() as u32)
+        .unwrap_or(4);
+    available.saturating_sub(2).clamp(2, 8)
+}
+
 pub fn list_available_transcription_models(
     app: &AppHandle,
     download_jobs: &std::collections::HashMap<String, ManagedTranscriptionModel>,
@@ -458,39 +588,129 @@ pub fn delete_managed_transcription_model(app: &AppHandle, model_id: &str) -> Re
     Ok(())
 }
 
-fn run_ffmpeg(app: &AppHandle, args: &[&str]) -> Result<()> {
-    let ffmpeg_path = resolve_ffmpeg_path(app);
-    let output = Command::new(&ffmpeg_path)
-        .args(args)
-        .output()
-        .with_context(|| format!("Failed to launch ffmpeg at {}.", ffmpeg_path.display()))?;
-
-    if output.status.success() {
-        return Ok(());
+pub fn path_size_bytes(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    anyhow::bail!("ffmpeg failed: {}", stderr.trim());
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("Failed to read metadata for {}.", path.display()))?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)
+        .with_context(|| format!("Failed to read directory {}.", path.display()))?
+    {
+        let entry = entry?;
+        total = total.saturating_add(path_size_bytes(&entry.path())?);
+    }
+    Ok(total)
 }
 
-fn run_whisper_cli(app: &AppHandle, args: &[&str]) -> Result<()> {
-    let whisper_cli_path = resolve_whisper_cli_path(app);
-    let output = Command::new(&whisper_cli_path)
-        .args(args)
-        .output()
-        .with_context(|| {
-            format!(
-                "Failed to launch whisper-cli at {}.",
-                whisper_cli_path.display()
-            )
-        })?;
-
-    if output.status.success() {
-        return Ok(());
+pub fn list_partial_downloads(app: &AppHandle) -> Result<Vec<PathBuf>> {
+    let models_dir = app_models_dir(app)?;
+    if !models_dir.exists() {
+        return Ok(Vec::new());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    anyhow::bail!("whisper-cli failed: {}", stderr.trim());
+    let mut partials = Vec::new();
+    for entry in fs::read_dir(&models_dir)
+        .with_context(|| format!("Failed to read model directory {}.", models_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| extension == "part")
+        {
+            partials.push(path);
+        }
+    }
+    Ok(partials)
+}
+
+pub fn is_inside_app_data(app: &AppHandle, path: &Path) -> Result<bool> {
+    let app_data = app_data_dir(app)?;
+    let canonical_app_data = app_data
+        .canonicalize()
+        .unwrap_or(app_data);
+    let canonical_path = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf());
+    Ok(canonical_path.starts_with(canonical_app_data))
+}
+
+fn is_task_canceled(app: &AppHandle, task_id: Option<&str>) -> bool {
+    task_id
+        .and_then(|task_id| {
+            app.try_state::<TranscriptionTaskState>()
+                .and_then(|state| state.is_canceled(task_id).ok())
+        })
+        .unwrap_or(false)
+}
+
+fn run_command_with_optional_task(
+    app: &AppHandle,
+    program_path: &Path,
+    args: &[&str],
+    task_id: Option<&str>,
+    label: &str,
+) -> Result<()> {
+    if task_id.is_none() {
+        let output = Command::new(program_path)
+            .args(args)
+            .output()
+            .with_context(|| format!("Failed to launch {label} at {}.", program_path.display()))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{label} failed: {}", stderr.trim());
+    }
+
+    let mut child = Command::new(program_path)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("Failed to launch {label} at {}.", program_path.display()))?;
+
+    loop {
+        if is_task_canceled(app, task_id) {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("Task canceled.");
+        }
+
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("Failed to wait for {label}."))?
+        {
+            if status.success() {
+                return Ok(());
+            }
+
+            anyhow::bail!("{label} failed with status {status}.");
+        }
+
+        thread::sleep(Duration::from_millis(150));
+    }
+}
+
+fn run_ffmpeg(app: &AppHandle, args: &[&str], task_id: Option<&str>) -> Result<()> {
+    let ffmpeg_path = resolve_ffmpeg_path(app);
+    run_command_with_optional_task(app, &ffmpeg_path, args, task_id, "ffmpeg")
+}
+
+fn run_whisper_cli(app: &AppHandle, args: &[&str], task_id: Option<&str>) -> Result<()> {
+    let whisper_cli_path = resolve_whisper_cli_path(app);
+    run_command_with_optional_task(app, &whisper_cli_path, args, task_id, "whisper-cli")
 }
 
 fn read_offset_ms(segment: &Value, key: &str) -> Option<u64> {
@@ -1199,7 +1419,9 @@ fn transcribe_audio_path(
     preferred_model_id: Option<&str>,
     language: &str,
     prompt: Option<&str>,
+    whisper_threads: u32,
     max_end_ms: Option<u64>,
+    task_id: Option<&str>,
 ) -> Result<Vec<TranscriptSegment>> {
     if !audio_path.exists() {
         anyhow::bail!("The audio file does not exist: {}", audio_path.display());
@@ -1221,6 +1443,8 @@ fn transcribe_audio_path(
         model_path_str,
         String::from("--file"),
         audio_path_str,
+        String::from("--threads"),
+        whisper_threads.to_string(),
         String::from("--output-json"),
         String::from("--output-json-full"),
         String::from("--output-file"),
@@ -1237,7 +1461,7 @@ fn transcribe_audio_path(
     }
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
 
-    run_whisper_cli(app, &arg_refs)?;
+    run_whisper_cli(app, &arg_refs, task_id)?;
 
     let raw_transcript = fs::read(&transcript_json_path).with_context(|| {
         format!(
@@ -1294,32 +1518,80 @@ fn wav_duration_ms(path: &Path, sample_rate: u32) -> Result<u64> {
     Ok(data_bytes.saturating_mul(1000) / bytes_per_second)
 }
 
-pub fn transcribe_normalized_audio(
+pub fn transcribe_normalized_audio_with_settings<F>(
     app: &AppHandle,
     session: &LectureSession,
-    preferred_model_id: Option<&str>,
-    preferred_language: Option<&str>,
-    prompt_terms: Option<&str>,
-) -> Result<Vec<TranscriptSegment>> {
+    settings: &ProcessingSettings,
+    task_id: Option<&str>,
+    mut on_chunk_progress: F,
+) -> Result<Vec<TranscriptSegment>>
+where
+    F: FnMut(usize, usize) -> Result<(), String>,
+{
+    let settings = normalize_processing_settings(settings.clone());
     let normalized_audio_path = session
         .normalized_audio_path
         .as_ref()
         .map(PathBuf::from)
         .context("The session is missing a normalized audio file.")?;
-    let transcript_json_path = transcript_json_path(app, &session.id)?;
-    let language = resolve_whisper_language(preferred_language);
-    let prompt = resolve_whisper_prompt(prompt_terms);
+    let language = resolve_whisper_language(Some(&settings.language));
+    let prompt = resolve_whisper_prompt(Some(&settings.prompt_terms));
+    let preferred_model_id = resolve_preferred_model_for_settings(app, &settings);
+    let whisper_threads = resolve_whisper_threads(&settings);
+    let chunks = split_normalized_audio_for_transcript(app, session, &settings, task_id)?;
+    let total_chunks = chunks.len().max(1);
+    let mut merged_segments = Vec::new();
+    let mut last_end_ms = 0u64;
 
-    transcribe_audio_path(
-        app,
-        &normalized_audio_path,
-        &transcript_json_path,
-        true,
-        preferred_model_id,
-        &language,
-        prompt.as_deref(),
-        None,
-    )
+    if chunks.is_empty() {
+        let transcript_json_path = transcript_json_path(app, &session.id)?;
+        return transcribe_audio_path(
+            app,
+            &normalized_audio_path,
+            &transcript_json_path,
+            true,
+            preferred_model_id.as_deref(),
+            &language,
+            prompt.as_deref(),
+            whisper_threads,
+            None,
+            task_id,
+        );
+    }
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        if is_task_canceled(app, task_id) {
+            anyhow::bail!("Task canceled.");
+        }
+        on_chunk_progress(index, total_chunks).map_err(|error| anyhow::anyhow!(error))?;
+        let transcript_json_path = chunk_transcript_json_path(app, &session.id, index + 1)?;
+        let mut segments = transcribe_audio_path(
+            app,
+            &chunk.path,
+            &transcript_json_path,
+            true,
+            preferred_model_id.as_deref(),
+            &language,
+            prompt.as_deref(),
+            whisper_threads,
+            Some(chunk.duration_ms),
+            task_id,
+        )?;
+        for segment in &mut segments {
+            segment.start_ms = segment.start_ms.saturating_add(chunk.start_ms);
+            segment.end_ms = segment.end_ms.saturating_add(chunk.start_ms);
+        }
+        for segment in segments {
+            if segment.end_ms <= last_end_ms {
+                continue;
+            }
+            last_end_ms = segment.end_ms;
+            merged_segments.push(segment);
+        }
+        on_chunk_progress(index + 1, total_chunks).map_err(|error| anyhow::anyhow!(error))?;
+    }
+
+    Ok(rewrite_transcript_segments(merged_segments, true))
 }
 
 pub fn transcribe_live_preview_audio(
@@ -1355,11 +1627,103 @@ pub fn transcribe_live_preview_audio(
         preferred_model_id,
         &language,
         prompt.as_deref(),
+        resolve_whisper_threads(&ProcessingSettings::default()),
         max_end_ms,
+        None,
     )
 }
 
-pub fn normalize_audio_for_transcript(app: &AppHandle, session: &LectureSession) -> Result<()> {
+struct AudioChunk {
+    path: PathBuf,
+    start_ms: u64,
+    duration_ms: u64,
+}
+
+fn split_normalized_audio_for_transcript(
+    app: &AppHandle,
+    session: &LectureSession,
+    settings: &ProcessingSettings,
+    task_id: Option<&str>,
+) -> Result<Vec<AudioChunk>> {
+    let normalized_audio_path = session
+        .normalized_audio_path
+        .as_ref()
+        .map(PathBuf::from)
+        .context("The session is missing a normalized audio file.")?;
+    let duration_ms = wav_duration_ms(&normalized_audio_path, 16_000)?;
+    let chunk_ms = u64::from(settings.chunk_duration_minutes.max(1)) * 60 * 1000;
+    if duration_ms == 0 || duration_ms <= chunk_ms {
+        return Ok(Vec::new());
+    }
+
+    let overlap_ms = u64::from(settings.chunk_overlap_seconds) * 1000;
+    let chunks_dir = session_dir_path(app, &session.id)?
+        .join("processed")
+        .join(CHUNKS_DIR_NAME);
+    if chunks_dir.exists() {
+        fs::remove_dir_all(&chunks_dir)
+            .with_context(|| format!("Failed to clear {}.", chunks_dir.display()))?;
+    }
+    fs::create_dir_all(&chunks_dir)
+        .with_context(|| format!("Failed to create {}.", chunks_dir.display()))?;
+
+    let mut chunks = Vec::new();
+    let mut start_ms = 0u64;
+    let mut index = 1usize;
+    let normalized_audio_str = normalized_audio_path.to_string_lossy().to_string();
+
+    while start_ms < duration_ms {
+        if is_task_canceled(app, task_id) {
+            anyhow::bail!("Task canceled.");
+        }
+
+        let end_ms = (start_ms + chunk_ms).min(duration_ms);
+        let actual_duration_ms = end_ms.saturating_sub(start_ms);
+        let chunk_path = chunks_dir.join(format!("chunk-{index:03}.wav"));
+        let chunk_path_str = chunk_path.to_string_lossy().to_string();
+        let start_seconds = format!("{:.3}", start_ms as f64 / 1000.0);
+        let duration_seconds = format!("{:.3}", actual_duration_ms as f64 / 1000.0);
+
+        run_ffmpeg(
+            app,
+            &[
+                "-y",
+                "-ss",
+                &start_seconds,
+                "-i",
+                &normalized_audio_str,
+                "-t",
+                &duration_seconds,
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                &chunk_path_str,
+            ],
+            task_id,
+        )?;
+
+        chunks.push(AudioChunk {
+            path: chunk_path,
+            start_ms,
+            duration_ms: actual_duration_ms,
+        });
+
+        if end_ms >= duration_ms {
+            break;
+        }
+        start_ms = end_ms.saturating_sub(overlap_ms.min(chunk_ms.saturating_sub(1)));
+        index += 1;
+    }
+
+    Ok(chunks)
+}
+
+pub fn normalize_audio_for_transcript(
+    app: &AppHandle,
+    session: &LectureSession,
+    task_id: Option<&str>,
+) -> Result<()> {
     if session.audio_file_paths.is_empty() {
         return Ok(());
     }
@@ -1386,6 +1750,7 @@ pub fn normalize_audio_for_transcript(app: &AppHandle, session: &LectureSession)
                 "16000",
                 &normalized_audio_str,
             ],
+            task_id,
         )?;
         return Ok(());
     }
@@ -1419,6 +1784,7 @@ pub fn normalize_audio_for_transcript(app: &AppHandle, session: &LectureSession)
             "16000",
             &normalized_audio_str,
         ],
+        task_id,
     )?;
 
     Ok(())
@@ -1562,8 +1928,11 @@ pub fn append_live_preview_chunk(session: &LectureSession, chunk: &[u8]) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_transcript_segments_with_finality, polish_transcript_text};
-    use crate::models::TranscriptSegment;
+    use super::{
+        normalize_processing_settings, parse_transcript_segments_with_finality,
+        polish_transcript_text,
+    };
+    use crate::models::{ProcessingQualityPreset, ProcessingSettings, TranscriptSegment};
 
     #[test]
     fn rewrites_whisper_cpp_json_into_sentence_segments() {
@@ -1648,5 +2017,52 @@ mod tests {
             polished,
             "今日は授業を始めます。まず前回の復習をします。\n\n質問はありますか？"
         );
+    }
+
+    #[test]
+    fn normalizes_balanced_processing_settings() {
+        let settings = normalize_processing_settings(ProcessingSettings {
+            quality_preset: ProcessingQualityPreset::Balanced,
+            preferred_model_id: Some(String::from("  ggml-small.bin  ")),
+            language: String::from(" ja "),
+            prompt_terms: String::from("  lecture prompt  "),
+            chunk_duration_minutes: 99,
+            chunk_overlap_seconds: 999,
+            whisper_threads: Some(99),
+            max_parallel_chunks: 99,
+            live_refresh_interval_seconds: 1,
+        });
+
+        assert_eq!(settings.quality_preset, ProcessingQualityPreset::Balanced);
+        assert_eq!(settings.preferred_model_id.as_deref(), Some("ggml-small.bin"));
+        assert_eq!(settings.language, "ja");
+        assert_eq!(settings.prompt_terms, "lecture prompt");
+        assert_eq!(settings.chunk_duration_minutes, 10);
+        assert_eq!(settings.chunk_overlap_seconds, 20);
+        assert_eq!(settings.whisper_threads, Some(16));
+        assert_eq!(settings.max_parallel_chunks, 1);
+        assert_eq!(settings.live_refresh_interval_seconds, 2);
+    }
+
+    #[test]
+    fn preserves_custom_chunking_with_bounds() {
+        let settings = normalize_processing_settings(ProcessingSettings {
+            quality_preset: ProcessingQualityPreset::Custom,
+            preferred_model_id: None,
+            language: String::new(),
+            prompt_terms: String::new(),
+            chunk_duration_minutes: 0,
+            chunk_overlap_seconds: 500,
+            whisper_threads: Some(0),
+            max_parallel_chunks: 8,
+            live_refresh_interval_seconds: 60,
+        });
+
+        assert_eq!(settings.language, "auto");
+        assert_eq!(settings.chunk_duration_minutes, 1);
+        assert_eq!(settings.chunk_overlap_seconds, 120);
+        assert_eq!(settings.whisper_threads, None);
+        assert_eq!(settings.max_parallel_chunks, 4);
+        assert_eq!(settings.live_refresh_interval_seconds, 30);
     }
 }

@@ -5,7 +5,7 @@ import { useLiveTranscript } from "../hooks/useLiveTranscript";
 import { useSessionAudioRecorder } from "../hooks/useSessionAudioRecorder";
 import { useSessionPolling } from "../hooks/useSessionPolling";
 import { useRecentState } from "../hooks/useRecentState";
-import { useTranscriptionSettings } from "../hooks/useTranscriptionSettings";
+import { useProcessingSettings } from "../hooks/useProcessingSettings";
 import { getErrorMessage } from "../lib/errors";
 import { formatDuration } from "../lib/format";
 import { getCaptureSourceLabel } from "../lib/session";
@@ -14,14 +14,14 @@ import {
   pauseSessionRecording,
   startSessionRecording,
   resumeSessionRecording,
-  saveSession,
+  saveSessionWithProcessingSettings,
   stopSessionRecording,
 } from "../lib/tauri";
 import type { LectureSession } from "../types/session";
 import { AudioLevelMeter } from "./AudioLevelMeter";
 import { ControlBar } from "./ControlBar";
-import { PanelList } from "./PanelList";
 import { SessionArtifacts } from "./SessionArtifacts";
+import { SessionStatsStrip } from "./SessionStatsStrip";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptPanel } from "./TranscriptPanel";
 
@@ -29,7 +29,7 @@ export function RecordingPage() {
   const navigate = useNavigate();
   const { sessionId } = useParams();
   const { updateRecentState } = useRecentState();
-  const { settings: transcriptionSettings } = useTranscriptionSettings();
+  const { settings: processingSettings } = useProcessingSettings();
   const [session, setSession] = useState<LectureSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isBusy, setIsBusy] = useState(false);
@@ -51,7 +51,7 @@ export function RecordingPage() {
   const liveDurationMs = useLiveSessionDuration(session);
   useLiveTranscript({
     session,
-    settings: transcriptionSettings,
+    settings: processingSettings,
     onSessionUpdate: handleSessionUpdate,
     onError: handleError,
   });
@@ -183,7 +183,7 @@ export function RecordingPage() {
       await stopSegment();
       const processing = await stopSessionRecording(session.id);
       setSession(processing);
-      await saveSession(session.id, transcriptionSettings);
+      await saveSessionWithProcessingSettings(session.id, processingSettings);
       await updateRecentState({
         activeSessionId: null,
         draftCaptureSource: processing.captureSource,
@@ -223,76 +223,85 @@ export function RecordingPage() {
     );
   }
 
+  const sourceLabel = getCaptureSourceLabel(session.captureSource);
+  const audioLabel =
+    session.captureSource === "microphone" ? "Microphone input level" : "System audio level";
+  const recordingHint =
+    session.captureSource === "systemAudio"
+      ? "System audio capture uses macOS ScreenCaptureKit. Select a browser window, app, or display when the native picker opens."
+      : "Real microphone audio is captured into local session files.";
+  const audioStatusText = `${audioStatusLabel}${isCapturingAudio ? "." : ""}`;
+  const recordingStats = [
+    {
+      label: "Duration",
+      value: formatDuration(liveDurationMs),
+      title: "Live session duration.",
+    },
+    {
+      label: "Segments",
+      value: String(session.segments.length),
+      title: "Draft transcript segments captured so far.",
+    },
+    {
+      label: "Source",
+      value: sourceLabel,
+      title: `Capture source: ${sourceLabel}.`,
+    },
+    {
+      label: "Phase",
+      value: session.transcriptPhase,
+      title: "Transcript pipeline state.",
+    },
+    ...(session.captureTargetLabel
+      ? [
+          {
+            label: "Target",
+            value: session.captureTargetLabel,
+            title: session.captureTargetLabel,
+          },
+        ]
+      : []),
+  ];
+
   return (
     <div className="page-grid recording-layout">
-      <section className="panel">
-        <AudioLevelMeter
-          level={session.captureSource === "microphone" ? audioLevel : session.audioLevel ?? 0}
-          label={
-            session.captureSource === "microphone"
-              ? "Microphone input level"
-              : "System audio level"
-          }
-        />
-
-        <div className="panel-header">
-          <div>
+      <section className="session-side-panel">
+        <div className="session-topline">
+          <div className="session-title-stack">
             <p className="eyebrow">Recording</p>
             <h2>{session.title}</h2>
           </div>
           <StatusBadge status={session.status} />
         </div>
 
-        <PanelList
-          rows={[
-            {
-              label: "Duration",
-              value: formatDuration(liveDurationMs),
-            },
-            {
-              label: "Transcript",
-              value: `${session.segments.length} segment(s)`,
-            },
-            {
-              label: "Source",
-              value: getCaptureSourceLabel(session.captureSource),
-            },
-            {
-              label: "Transcript status",
-              value: session.transcriptPhase,
-            },
-            ...(session.captureTargetLabel
-              ? [{ label: "Capture target", value: session.captureTargetLabel }]
-              : []),
-          ]}
+        <SessionStatsStrip items={recordingStats} />
+
+        <div className="session-command-bar" title={recordingHint}>
+          <div className="session-command-row">
+            <AudioLevelMeter
+              level={session.captureSource === "microphone" ? audioLevel : session.audioLevel ?? 0}
+              label={audioLabel}
+            />
+
+            <ControlBar
+              status={session.status}
+              isBusy={isBusy}
+              onStart={handleStart}
+              onPause={() => updateStatus("paused")}
+              onResume={() => updateStatus("recording")}
+              onStop={handleStop}
+            />
+          </div>
+          <p className="session-inline-note" title={`${recordingHint} ${audioStatusText}`}>
+            {audioStatusText}
+          </p>
+        </div>
+
+        <SessionArtifacts
+          session={session}
+          onSessionUpdate={handleSessionUpdate}
+          onSessionDelete={() => navigate("/new")}
         />
-
-        <ControlBar
-          status={session.status}
-          isBusy={isBusy}
-          onStart={handleStart}
-          onPause={() => updateStatus("paused")}
-          onResume={() => updateStatus("recording")}
-          onStop={handleStop}
-        />
-
-        <p className="helper-text">
-          {session.captureSource === "systemAudio"
-            ? "System audio capture uses macOS ScreenCaptureKit. Select your browser window, application, or display when the native picker opens."
-            : "Real microphone audio is captured into local session files."}{" "}
-          Draft transcript segments refresh during recording, then a final
-          transcript is regenerated locally after you stop the session.
-        </p>
-        <p className="helper-text">
-          {audioStatusLabel}
-          {isCapturingAudio ? "." : ""}
-        </p>
-        <p className="helper-text">
-          One uninterrupted take produces one capture file. Pausing and resuming
-          creates additional files for the same session.
-        </p>
-
-        <SessionArtifacts session={session} />
 
         {session.transcriptError ? (
           <p className="error-banner">{session.transcriptError}</p>

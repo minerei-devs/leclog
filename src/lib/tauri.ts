@@ -1,8 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CaptureSource,
+  BackgroundTask,
   LectureSession,
   ManagedTranscriptionModel,
+  ProcessingSettings,
+  ResourceOverview,
+  RuntimeStatus,
   TranscriptionModelInfo,
   TranscriptionSettings,
   TranscriptSegment,
@@ -18,14 +22,21 @@ export function createSession(title?: string, captureSource?: CaptureSource) {
 export function importMediaSession(
   filePath: string,
   title?: string,
-  settings?: Partial<TranscriptionSettings>,
+  settings?: Partial<TranscriptionSettings & ProcessingSettings>,
 ) {
   return invoke<LectureSession>("import_media_session", {
     filePath,
     title: title?.trim() ? title.trim() : null,
     preferredModelId: settings?.preferredModelId ?? null,
-    preferredLanguage: settings?.preferredLanguage?.trim() || null,
+    preferredLanguage:
+      settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
     promptTerms: settings?.promptTerms?.trim() || null,
+    qualityPreset: settings?.qualityPreset ?? null,
+    chunkDurationMinutes: settings?.chunkDurationMinutes ?? null,
+    chunkOverlapSeconds: settings?.chunkOverlapSeconds ?? null,
+    whisperThreads: settings?.whisperThreads ?? null,
+    maxParallelChunks: settings?.maxParallelChunks ?? null,
+    liveRefreshIntervalSeconds: settings?.liveRefreshIntervalSeconds ?? null,
   });
 }
 
@@ -110,12 +121,13 @@ export function appendLivePreviewChunk(sessionId: string, chunk: number[]) {
 
 export function queueLiveTranscriptRefresh(
   sessionId: string,
-  settings?: Partial<TranscriptionSettings>,
+  settings?: Partial<TranscriptionSettings & ProcessingSettings>,
 ) {
   return invoke<LectureSession>("queue_live_transcript_refresh", {
     sessionId,
     preferredModelId: settings?.preferredModelId ?? null,
-    preferredLanguage: settings?.preferredLanguage?.trim() || null,
+    preferredLanguage:
+      settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
     promptTerms: settings?.promptTerms?.trim() || null,
   });
 }
@@ -151,17 +163,102 @@ export function setSessionStatus(sessionId: string, status: string) {
   });
 }
 
-export function saveSession(sessionId: string, settings?: Partial<TranscriptionSettings>) {
+export function saveSession(
+  sessionId: string,
+  settings?: Partial<TranscriptionSettings & ProcessingSettings>,
+) {
   return invoke<void>("save_session", {
     sessionId,
     preferredModelId: settings?.preferredModelId ?? null,
-    preferredLanguage: settings?.preferredLanguage?.trim() || null,
+    preferredLanguage:
+      settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
     promptTerms: settings?.promptTerms?.trim() || null,
+    qualityPreset: settings?.qualityPreset ?? null,
+    chunkDurationMinutes: settings?.chunkDurationMinutes ?? null,
+    chunkOverlapSeconds: settings?.chunkOverlapSeconds ?? null,
+    whisperThreads: settings?.whisperThreads ?? null,
+    maxParallelChunks: settings?.maxParallelChunks ?? null,
+    liveRefreshIntervalSeconds: settings?.liveRefreshIntervalSeconds ?? null,
   });
 }
 
 export function polishSessionTranscript(sessionId: string) {
   return invoke<LectureSession>("polish_session_transcript", {
     sessionId,
+  });
+}
+
+export function saveSessionWithProcessingSettings(
+  sessionId: string,
+  settings?: Partial<TranscriptionSettings & ProcessingSettings>,
+) {
+  return invoke<void>("save_session", {
+    sessionId,
+    preferredModelId: settings?.preferredModelId ?? null,
+    preferredLanguage:
+      settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
+    promptTerms: settings?.promptTerms?.trim() || null,
+    qualityPreset: settings?.qualityPreset ?? null,
+    chunkDurationMinutes: settings?.chunkDurationMinutes ?? null,
+    chunkOverlapSeconds: settings?.chunkOverlapSeconds ?? null,
+    whisperThreads: settings?.whisperThreads ?? null,
+    maxParallelChunks: settings?.maxParallelChunks ?? null,
+    liveRefreshIntervalSeconds: settings?.liveRefreshIntervalSeconds ?? null,
+  });
+}
+
+export function getRuntimeStatus() {
+  return invoke<RuntimeStatus>("get_runtime_status");
+}
+
+export function listResources() {
+  return invoke<ResourceOverview>("list_resources");
+}
+
+export function deleteResource(
+  path: string,
+  sessionId?: string | null,
+  modelId?: string | null,
+) {
+  return invoke<ResourceOverview>("delete_resource", {
+    path,
+    sessionId: sessionId ?? null,
+    modelId: modelId ?? null,
+  });
+}
+
+export function revealResource(path: string) {
+  return invoke<void>("reveal_resource", { path });
+}
+
+export function listBackgroundTasks() {
+  return invoke<BackgroundTask[]>("list_background_tasks");
+}
+
+export function cancelBackgroundTask(taskId: string) {
+  return invoke<BackgroundTask>("cancel_background_task", { taskId });
+}
+
+export function retrySessionProcessing(sessionId: string) {
+  return invoke<LectureSession>("retry_session_processing", { sessionId });
+}
+
+export function getProcessingSettings() {
+  return invoke<ProcessingSettings>("get_processing_settings");
+}
+
+export function patchProcessingSettings(patch: Partial<ProcessingSettings>) {
+  return invoke<ProcessingSettings>("patch_processing_settings", {
+    qualityPreset: patch.qualityPreset ?? null,
+    preferredModelId: patch.preferredModelId ?? null,
+    clearPreferredModelId: patch.preferredModelId === null,
+    language: patch.language ?? null,
+    promptTerms: patch.promptTerms ?? null,
+    chunkDurationMinutes: patch.chunkDurationMinutes ?? null,
+    chunkOverlapSeconds: patch.chunkOverlapSeconds ?? null,
+    whisperThreads: patch.whisperThreads ?? null,
+    clearWhisperThreads: patch.whisperThreads === null,
+    maxParallelChunks: patch.maxParallelChunks ?? null,
+    liveRefreshIntervalSeconds: patch.liveRefreshIntervalSeconds ?? null,
   });
 }

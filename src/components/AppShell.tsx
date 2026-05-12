@@ -4,14 +4,15 @@ import { FolderCog, Plus, Waves } from "lucide-react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { formatDuration } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { listSessions } from "@/lib/tauri";
+import { listBackgroundTasks, listSessions } from "@/lib/tauri";
 import { getCaptureSourceLabel, getSessionHref } from "@/lib/session";
-import type { LectureSession } from "@/types/session";
+import type { BackgroundTask, LectureSession } from "@/types/session";
 import { useSessionPolling } from "@/hooks/useSessionPolling";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { SettingsPage } from "./SettingsPage";
 
 function sessionBadgeClass(session: LectureSession) {
   if (session.status === "recording") {
@@ -43,9 +44,46 @@ function formatSidebarTime(date: string) {
   }).format(new Date(date));
 }
 
+function isActiveTask(task: BackgroundTask) {
+  return task.status === "queued" || task.status === "running";
+}
+
+function isVisibleSessionTask(task: BackgroundTask) {
+  return Boolean(task.sessionId) && (isActiveTask(task) || task.status === "failed");
+}
+
+function sessionTaskStage(task: BackgroundTask) {
+  const step = task.step.toLowerCase();
+  if (task.status === "queued") {
+    return 0;
+  }
+  if (step.includes("normal")) {
+    return 1;
+  }
+  if (step.includes("transcrib") || step.includes("chunk")) {
+    return 2;
+  }
+  if (step.includes("polish")) {
+    return 3;
+  }
+  return Math.max(1, Math.min(3, Math.ceil(task.percent / 34)));
+}
+
+function sessionTaskTone(task: BackgroundTask) {
+  if (task.status === "failed") {
+    return "bg-red-500";
+  }
+  if (task.status === "queued") {
+    return "bg-slate-400";
+  }
+  return "bg-blue-600";
+}
+
 export function AppShell({ children }: PropsWithChildren) {
   const location = useLocation();
   const [sessions, setSessions] = useState<LectureSession[]>([]);
+  const [tasks, setTasks] = useState<BackgroundTask[]>([]);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const hasActiveProcessing = sessions.some(
     (session) =>
       session.status !== "done" ||
@@ -56,10 +94,11 @@ export function AppShell({ children }: PropsWithChildren) {
   useEffect(() => {
     let isMounted = true;
 
-    void listSessions()
-      .then((result) => {
+    void Promise.all([listSessions(), listBackgroundTasks()])
+      .then(([result, nextTasks]) => {
         if (isMounted) {
           setSessions(result);
+          setTasks(nextTasks);
         }
       })
       .catch(() => {});
@@ -75,14 +114,50 @@ export function AppShell({ children }: PropsWithChildren) {
     onSessions: setSessions,
   });
 
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      void listBackgroundTasks().then(setTasks).catch(() => {});
+    }, 2000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleOpenSettings() {
+      setIsSettingsOpen(true);
+    }
+
+    window.addEventListener("leclog:open-settings", handleOpenSettings);
+    return () => {
+      window.removeEventListener("leclog:open-settings", handleOpenSettings);
+    };
+  }, []);
+
   const sortedSessions = useMemo(
     () =>
       [...sessions].sort(
         (left, right) =>
           new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
-      ),
+    ),
     [sessions],
   );
+  const activeTaskCount = tasks.filter(isActiveTask).length;
+  const sessionTasksById = useMemo(() => {
+    const entries = tasks
+      .filter(isVisibleSessionTask)
+      .sort(
+        (left, right) =>
+          new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+      );
+
+    return entries.reduce<Record<string, BackgroundTask>>((result, task) => {
+      if (task.sessionId && !result[task.sessionId]) {
+        result[task.sessionId] = task;
+      }
+      return result;
+    }, {});
+  }, [tasks]);
 
   return (
     <div className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,rgba(170,201,243,0.22),transparent_28%),linear-gradient(180deg,#f8fafc_0%,#eef2f7_100%)] text-slate-950">
@@ -110,11 +185,22 @@ export function AppShell({ children }: PropsWithChildren) {
                 <span className="text-white">New session</span>
               </Link>
 
-              <Button asChild variant="ghost" className="h-9 justify-start rounded-lg px-3">
-                <Link to="/settings">
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-9 justify-start rounded-lg px-3"
+                onClick={() => setIsSettingsOpen(true)}
+              >
                   <FolderCog className="size-4" />
                   Settings
-                </Link>
+                  {activeTaskCount > 0 ? (
+                    <Badge
+                      variant="outline"
+                      className="ml-auto rounded-full border-blue-200 bg-blue-50 px-2 text-blue-700"
+                    >
+                      {activeTaskCount}
+                    </Badge>
+                  ) : null}
               </Button>
             </div>
           </div>
@@ -146,6 +232,15 @@ export function AppShell({ children }: PropsWithChildren) {
               ) : (
                 sortedSessions.map((session) => {
                   const href = getSessionHref(session);
+                  const task = sessionTasksById[session.id];
+                  const taskStage = task ? sessionTaskStage(task) : 0;
+                  const taskPercent = task
+                    ? Math.max(0, Math.min(100, Math.round(task.percent)))
+                    : 0;
+                  const chunkLabel =
+                    task && task.totalChunks > 0
+                      ? `${task.completedChunks}/${task.totalChunks} chunks`
+                      : null;
                   const isActive =
                     location.pathname === href ||
                     location.pathname.endsWith(`/session/${session.id}`) ||
@@ -156,13 +251,14 @@ export function AppShell({ children }: PropsWithChildren) {
                       key={session.id}
                       to={href}
                       className={cn(
-                        "block rounded-xl border border-transparent bg-transparent px-2.5 py-2.5 transition-colors hover:border-slate-200 hover:bg-slate-50/80",
+                        "block w-full max-w-full overflow-hidden rounded-xl border border-transparent bg-transparent px-2.5 py-2.5 transition-colors hover:border-slate-200 hover:bg-slate-50/80",
                         isActive && "border-slate-200 bg-white shadow-sm",
                       )}
+                      title={`${session.title} · ${getCaptureSourceLabel(session.captureSource)} · ${session.transcriptPhase}`}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium text-slate-950">
+                      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
+                        <div className="min-w-0 overflow-hidden">
+                          <p className="block max-w-full truncate text-sm font-medium text-slate-950">
                             {session.title}
                           </p>
                         </div>
@@ -177,14 +273,54 @@ export function AppShell({ children }: PropsWithChildren) {
                         </Badge>
                       </div>
 
-                      <p className="mt-2 truncate text-[11px] text-slate-500">
+                      <p className="mt-1.5 block max-w-full truncate text-[11px] text-slate-500">
                         {getCaptureSourceLabel(session.captureSource)} ({formatDuration(session.durationMs)})
                       </p>
 
-                      <div className="mt-2 flex items-center gap-2 text-[11px] text-slate-500">
-                        <div className="flex min-w-0 items-center gap-2">
+                      {task ? (
+                        <div
+                          className="mt-2 rounded-lg border border-slate-200 bg-white/80 px-2 py-1.5"
+                          title={`${task.title}: ${task.step} (${taskPercent}%)${task.error ? ` · ${task.error}` : ""}`}
+                        >
+                          <div className="mb-1 flex items-center justify-between gap-2 text-[10px] text-slate-500">
+                            <span className="min-w-0 truncate">{task.step}</span>
+                            <span className="shrink-0 tabular-nums">{taskPercent}%</span>
+                          </div>
+                          <div className="relative h-1.5 overflow-hidden rounded-full bg-slate-100">
+                            <div
+                              className={cn("h-full rounded-full transition-all", sessionTaskTone(task))}
+                              style={{ width: `${taskPercent}%` }}
+                            />
+                          </div>
+                          <div className="mt-1 flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1">
+                              {[0, 1, 2, 3].map((stage) => (
+                                <span
+                                  key={stage}
+                                  className={cn(
+                                    "size-1.5 rounded-full",
+                                    stage <= taskStage
+                                      ? task.status === "failed"
+                                        ? "bg-red-500"
+                                        : "bg-blue-600"
+                                      : "bg-slate-200",
+                                  )}
+                                />
+                              ))}
+                            </div>
+                            {chunkLabel ? (
+                              <span className="truncate text-[10px] text-slate-400">
+                                {chunkLabel}
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      <div className="mt-2 flex min-w-0 items-center gap-2 text-[11px] text-slate-500">
+                        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
                           <Waves className="size-3.5 shrink-0" />
-                          <span className="truncate">
+                          <span className="block max-w-full truncate">
                             {session.segments.length} segments · {session.transcriptPhase}
                           </span>
                         </div>
@@ -201,9 +337,10 @@ export function AppShell({ children }: PropsWithChildren) {
         </aside>
 
         <main className="h-screen overflow-y-auto">
-          <div className="mx-auto w-full max-w-6xl px-8 py-8">{children}</div>
+          <div className="mx-auto w-full max-w-7xl px-6 py-6">{children}</div>
         </main>
       </div>
+      <SettingsPage isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
   );
 }
