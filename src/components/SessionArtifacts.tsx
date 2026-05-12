@@ -139,6 +139,16 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
     }
   }
 
+  async function handleClearSessionFiles() {
+    const sessionFolder = rows.find((row) => row.kind === "folder");
+    if (!sessionFolder) {
+      setError("This session does not have a managed folder.");
+      return;
+    }
+
+    await handleDelete(sessionFolder);
+  }
+
   async function handleDelete(row: ArtifactRow) {
     const isSessionFolder = row.kind === "folder";
     const message = isSessionFolder
@@ -176,22 +186,35 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
     >
       <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-2.5 py-1.5">
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-slate-950">Session resources</h3>
+          <h3 className="text-sm font-semibold text-slate-950">Resources</h3>
           <p className="truncate text-[11px] text-slate-500">
             {captureCount} capture file(s), {processedCount} processed artifact(s)
           </p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          title="Run normalize, transcribe, merge, and polish again for this session."
-          disabled={busyAction === "reprocess" || session.audioFilePaths.length === 0}
-          onClick={() => void handleReprocess()}
-        >
-          <RotateCcw className="size-3.5" />
-          Reprocess
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            title="Run normalize, transcribe, merge, and polish again for this session."
+            disabled={busyAction === "reprocess" || session.audioFilePaths.length === 0}
+            onClick={() => void handleReprocess()}
+          >
+            <RotateCcw className="size-3.5" />
+            Reprocess
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            title="Delete this session and all Leclog-managed files for it."
+            disabled={!canDeleteResources || !session.sessionDir || busyAction?.startsWith("delete:")}
+            onClick={() => void handleClearSessionFiles()}
+          >
+            <Trash2 className="size-3.5" />
+            Clear
+          </Button>
+        </div>
       </div>
 
       <div className="max-h-[42vh] overflow-y-auto px-2.5">

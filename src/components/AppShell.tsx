@@ -1,10 +1,10 @@
 import type { PropsWithChildren } from "react";
 import { useEffect, useMemo, useState } from "react";
-import { FolderCog, Plus, Waves } from "lucide-react";
+import { Activity, Clock3, FolderCog, Plus, Waves, XCircle } from "lucide-react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { formatDuration } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { listBackgroundTasks, listSessions } from "@/lib/tauri";
+import { cancelBackgroundTask, listBackgroundTasks, listSessions } from "@/lib/tauri";
 import { getCaptureSourceLabel, getSessionHref } from "@/lib/session";
 import type { BackgroundTask, LectureSession } from "@/types/session";
 import { useSessionPolling } from "@/hooks/useSessionPolling";
@@ -79,11 +79,69 @@ function sessionTaskTone(task: BackgroundTask) {
   return "bg-blue-600";
 }
 
+function taskStatusClass(status: BackgroundTask["status"]) {
+  if (status === "running" || status === "queued") {
+    return "border-blue-200 bg-blue-50 text-blue-700";
+  }
+  if (status === "failed") {
+    return "border-red-200 bg-red-50 text-red-700";
+  }
+  if (status === "succeeded") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+  return "border-slate-200 bg-slate-100 text-slate-600";
+}
+
+function formatEtaDuration(durationMs: number) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return "<1m";
+  }
+
+  const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
+  if (totalSeconds < 60) {
+    return "<1m";
+  }
+
+  const minutes = Math.round(totalSeconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function estimateTaskEta(task: BackgroundTask) {
+  if (task.status === "queued") {
+    return "waiting";
+  }
+  if (task.status === "failed") {
+    return "failed";
+  }
+  if (task.status === "succeeded") {
+    return "done";
+  }
+  if (task.percent <= 1 || task.percent >= 100) {
+    return "calculating";
+  }
+
+  const elapsedMs = Date.now() - new Date(task.createdAt).getTime();
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+    return "calculating";
+  }
+
+  const remainingMs = (elapsedMs / task.percent) * (100 - task.percent);
+  return `~${formatEtaDuration(remainingMs)} left`;
+}
+
 export function AppShell({ children }: PropsWithChildren) {
   const location = useLocation();
   const [sessions, setSessions] = useState<LectureSession[]>([]);
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
+  const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const hasActiveProcessing = sessions.some(
     (session) =>
       session.status !== "done" ||
@@ -143,6 +201,16 @@ export function AppShell({ children }: PropsWithChildren) {
     [sessions],
   );
   const activeTaskCount = tasks.filter(isActiveTask).length;
+  const visibleTasks = useMemo(
+    () =>
+      tasks
+        .filter((task) => isActiveTask(task) || task.status === "failed")
+        .sort(
+          (left, right) =>
+            new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+        ),
+    [tasks],
+  );
   const sessionTasksById = useMemo(() => {
     const entries = tasks
       .filter(isVisibleSessionTask)
@@ -158,6 +226,17 @@ export function AppShell({ children }: PropsWithChildren) {
       return result;
     }, {});
   }, [tasks]);
+
+  async function handleCancelTask(taskId: string) {
+    setBusyTaskId(taskId);
+    try {
+      await cancelBackgroundTask(taskId);
+      const nextTasks = await listBackgroundTasks();
+      setTasks(nextTasks);
+    } finally {
+      setBusyTaskId(null);
+    }
+  }
 
   return (
     <div className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,rgba(170,201,243,0.22),transparent_28%),linear-gradient(180deg,#f8fafc_0%,#eef2f7_100%)] text-slate-950">
@@ -340,6 +419,113 @@ export function AppShell({ children }: PropsWithChildren) {
           <div className="mx-auto w-full max-w-7xl px-6 py-6">{children}</div>
         </main>
       </div>
+      {visibleTasks.length > 0 ? (
+        <div className="fixed bottom-4 right-4 z-40 w-[min(360px,calc(100vw-2rem))]">
+          {isTaskPanelOpen ? (
+            <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-3 py-2">
+                <div className="min-w-0">
+                  <h2 className="text-sm font-semibold text-slate-950">Background tasks</h2>
+                  <p className="truncate text-xs text-slate-500">
+                    {activeTaskCount} active, {visibleTasks.length} visible
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Collapse background tasks"
+                  onClick={() => setIsTaskPanelOpen(false)}
+                >
+                  <XCircle className="size-4" />
+                </Button>
+              </div>
+
+              <div className="max-h-80 overflow-y-auto px-3">
+                {visibleTasks.map((task) => {
+                  const percent = Math.max(0, Math.min(100, Math.round(task.percent)));
+                  const chunkLabel =
+                    task.totalChunks > 0
+                      ? `${task.completedChunks}/${task.totalChunks} chunks`
+                      : null;
+
+                  return (
+                    <article key={task.id} className="border-b border-slate-100 py-2 last:border-b-0">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-slate-950">
+                            {task.title}
+                          </p>
+                          <p className="mt-0.5 truncate text-xs text-slate-500">
+                            {task.step}
+                          </p>
+                        </div>
+                        <Badge
+                          variant="outline"
+                          className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px]", taskStatusClass(task.status))}
+                        >
+                          {task.status}
+                        </Badge>
+                      </div>
+
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                        <div
+                          className={cn("h-full rounded-full transition-all", sessionTaskTone(task))}
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+
+                      <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                        <span className="tabular-nums">{percent}%</span>
+                        {chunkLabel ? <span>{chunkLabel}</span> : null}
+                        <span className="ml-auto inline-flex items-center gap-1">
+                          <Clock3 className="size-3" />
+                          {estimateTaskEta(task)}
+                        </span>
+                      </div>
+
+                      {task.error ? (
+                        <p className="mt-1 rounded-md bg-red-50 px-2 py-1 text-xs text-red-700">
+                          {task.error}
+                        </p>
+                      ) : null}
+
+                      {task.cancelable && isActiveTask(task) ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="xs"
+                          className="mt-2"
+                          disabled={busyTaskId === task.id}
+                          onClick={() => void handleCancelTask(task.id)}
+                        >
+                          <XCircle className="size-3" />
+                          Cancel
+                        </Button>
+                      ) : null}
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          ) : (
+            <button
+              type="button"
+              className="ml-auto flex h-10 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-sm font-medium text-slate-950 shadow-xl transition-colors hover:bg-slate-50"
+              onClick={() => setIsTaskPanelOpen(true)}
+            >
+              <Activity className="size-4 text-blue-600" />
+              <span>
+                {activeTaskCount || visibleTasks.length} task
+                {(activeTaskCount || visibleTasks.length) === 1 ? "" : "s"}
+              </span>
+              <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
+                {visibleTasks[0] ? `${Math.round(visibleTasks[0].percent)}%` : "0%"}
+              </span>
+            </button>
+          )}
+        </div>
+      ) : null}
       <SettingsPage isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
   );
