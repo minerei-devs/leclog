@@ -423,6 +423,13 @@ a {
   white-space: nowrap;
 }
 
+.session-top-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
 .session-stats-strip {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

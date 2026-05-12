@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Leclog",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "identifier": "com.minerei.leclog",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -26,6 +26,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
@@ -35,5 +36,13 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/ffmpeg"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM0RDk2MTA5QTM0N0M1MjYKUldRbXhVZWpDV0haTkxadExsNWVjU2hrc0lrQTJtcDRnTXFYV0lzMHQzZDBRN2IxOUFnOU40YVUK",
+      "endpoints": [
+        "https://github.com/minerei-devs/leclog/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

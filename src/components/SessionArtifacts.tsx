@@ -1,9 +1,10 @@
 import { Copy, FolderSearch, RotateCcw, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { deleteResource, getSession, revealResource, retrySessionProcessing } from "@/lib/tauri";
+import { deleteResource, deleteSession, getSession, revealResource, retrySessionProcessing } from "@/lib/tauri";
 import type { LectureSession } from "@/types/session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface SessionArtifactsProps {
   session: LectureSession;
@@ -19,6 +20,11 @@ interface ArtifactRow {
   deletable: boolean;
 }
 
+type PendingDelete =
+  | { kind: "session" }
+  | { kind: "resource"; row: ArtifactRow }
+  | null;
+
 function fileName(path: string) {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : path;
@@ -27,7 +33,9 @@ function fileName(path: string) {
 export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: SessionArtifactsProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const canDeleteResources = session.status !== "recording" && session.status !== "processing";
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
+  const canDeleteSession = session.status !== "recording";
+  const canDeleteResources = canDeleteSession && session.transcriptPhase !== "processing";
 
   const rows = useMemo<ArtifactRow[]>(() => {
     const baseRows: ArtifactRow[] = [
@@ -36,7 +44,7 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
         value: session.sessionDir ?? "",
         kind: "folder",
         revealable: true,
-        deletable: canDeleteResources,
+        deletable: canDeleteSession,
       },
       {
         label: "Active",
@@ -99,7 +107,7 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
         deletable: canDeleteResources,
       })),
     ].filter((row) => row.value.trim().length > 0);
-  }, [canDeleteResources, session]);
+  }, [canDeleteResources, canDeleteSession, session]);
 
   if (rows.length === 0) {
     return null;
@@ -139,36 +147,55 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
     }
   }
 
-  async function handleClearSessionFiles() {
-    const sessionFolder = rows.find((row) => row.kind === "folder");
-    if (!sessionFolder) {
-      setError("This session does not have a managed folder.");
-      return;
-    }
-
-    await handleDelete(sessionFolder);
-  }
-
-  async function handleDelete(row: ArtifactRow) {
-    const isSessionFolder = row.kind === "folder";
-    const message = isSessionFolder
-      ? `Delete the whole session "${session.title}" and all local files?`
-      : `Delete ${row.label}?`;
-    if (!window.confirm(`${message}\n\nThis only removes Leclog app data.`)) {
+  async function handleDeleteSession() {
+    if (session.status === "recording") {
+      setError("Pause or stop recording before deleting this session.");
       return;
     }
 
     try {
+      setBusyAction("delete-session");
+      setError(null);
+      await deleteSession(session.id);
+      window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
+      onSessionDelete?.();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to delete this session.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleDelete(row: ArtifactRow) {
+    const isSessionFolder = row.kind === "folder";
+    if (isSessionFolder) {
+      setError(null);
+      setPendingDelete({ kind: "session" });
+      return;
+    }
+
+    setError(null);
+    setPendingDelete({ kind: "resource", row });
+  }
+
+  async function handleConfirmDelete() {
+    if (!pendingDelete) {
+      return;
+    }
+
+    if (pendingDelete.kind === "session") {
+      await handleDeleteSession();
+      return;
+    }
+
+    const row = pendingDelete.row;
+    try {
       setBusyAction(`delete:${row.value}`);
       setError(null);
       await deleteResource(row.value, session.id, null);
-      if (isSessionFolder) {
-        onSessionDelete?.();
-        return;
-      }
-
       const updated = await getSession(session.id);
       onSessionUpdate?.(updated);
+      setPendingDelete(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to delete this resource.");
     } finally {
@@ -208,11 +235,14 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
             variant="destructive"
             size="sm"
             title="Delete this session and all Leclog-managed files for it."
-            disabled={!canDeleteResources || !session.sessionDir || busyAction?.startsWith("delete:")}
-            onClick={() => void handleClearSessionFiles()}
+            disabled={busyAction === "delete-session" || busyAction?.startsWith("delete:")}
+            onClick={() => {
+              setError(null);
+              setPendingDelete({ kind: "session" });
+            }}
           >
             <Trash2 className="size-3.5" />
-            Clear
+            Delete
           </Button>
         </div>
       </div>
@@ -270,6 +300,34 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
       </div>
 
       {error ? <p className="border-t border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={pendingDelete?.kind === "resource" ? `Delete ${pendingDelete.row.label}?` : "Delete session?"}
+        description={
+          pendingDelete?.kind === "resource"
+            ? "This removes only this Leclog-managed resource from the session."
+            : canDeleteSession
+              ? "This removes the session record and all Leclog-managed files for it. Any active processing task for this session will be canceled first."
+              : "This session is actively recording. Pause or stop recording before deleting it."
+        }
+        details={
+          pendingDelete?.kind === "resource"
+            ? [pendingDelete.row.value]
+            : [session.title, session.sessionDir ?? "Managed session folder"]
+        }
+        confirmLabel={pendingDelete?.kind === "resource" ? "Delete resource" : "Delete session"}
+        isBusy={busyAction?.startsWith("delete") ?? false}
+        confirmDisabled={pendingDelete?.kind === "session" && !canDeleteSession}
+        error={error}
+        onCancel={() => {
+          if (!busyAction?.startsWith("delete")) {
+            setPendingDelete(null);
+            setError(null);
+          }
+        }}
+        onConfirm={() => void handleConfirmDelete()}
+      />
     </section>
   );
 }

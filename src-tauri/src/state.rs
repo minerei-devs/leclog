@@ -326,6 +326,47 @@ impl TranscriptionTaskState {
         self.get_task(task_id)
     }
 
+    pub fn cancel_session_tasks(&self, session_id: &str) -> Result<Vec<BackgroundTask>, String> {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| String::from("Failed to acquire background task lock."))?;
+        let mut canceled = self
+            .canceled_tasks
+            .lock()
+            .map_err(|_| String::from("Failed to acquire task cancellation lock."))?;
+        let timestamp = now_iso();
+        let mut canceled_tasks = Vec::new();
+
+        for task in tasks.values_mut().filter(|task| {
+            task.session_id.as_deref() == Some(session_id)
+                && matches!(
+                    task.status,
+                    BackgroundTaskStatus::Queued | BackgroundTaskStatus::Running
+                )
+        }) {
+            canceled.insert(task.id.clone());
+            task.status = BackgroundTaskStatus::Canceled;
+            task.step = String::from("Canceling");
+            task.error = None;
+            task.cancelable = false;
+            task.updated_at = timestamp.clone();
+            canceled_tasks.push(task.clone());
+        }
+        drop(canceled);
+        drop(tasks);
+
+        {
+            let mut live_jobs = self
+                .live_jobs
+                .lock()
+                .map_err(|_| String::from("Failed to acquire live transcription job lock."))?;
+            live_jobs.remove(session_id);
+        }
+
+        Ok(canceled_tasks)
+    }
+
     pub fn is_canceled(&self, task_id: &str) -> Result<bool, String> {
         let canceled = self
             .canceled_tasks
@@ -546,5 +587,48 @@ mod tests {
 
         assert_eq!(canceled.status, BackgroundTaskStatus::Canceled);
         assert!(state.is_canceled(&task.id).expect("cancel check should work"));
+    }
+
+    #[test]
+    fn cancels_active_tasks_for_session() {
+        let state = TranscriptionTaskState::default();
+        let session_task = state
+            .create_task(
+                BackgroundTaskKind::FinalTranscription,
+                String::from("Transcribe"),
+                Some(String::from("session-1")),
+                None,
+                true,
+            )
+            .expect("task should be created");
+        let other_task = state
+            .create_task(
+                BackgroundTaskKind::FinalTranscription,
+                String::from("Other"),
+                Some(String::from("session-2")),
+                None,
+                true,
+            )
+            .expect("other task should be created");
+
+        state
+            .start_task(&session_task.id, "Running")
+            .expect("task should start");
+        state
+            .start_task(&other_task.id, "Running")
+            .expect("other task should start");
+
+        let canceled = state
+            .cancel_session_tasks("session-1")
+            .expect("session tasks should cancel");
+
+        assert_eq!(canceled.len(), 1);
+        assert_eq!(canceled[0].id, session_task.id);
+        assert!(state
+            .is_canceled(&session_task.id)
+            .expect("cancel check should work"));
+        assert!(!state
+            .is_canceled(&other_task.id)
+            .expect("cancel check should work"));
     }
 }

@@ -15,12 +15,16 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
+import { check } from "@tauri-apps/plugin-updater";
+import type { DownloadEvent, Update } from "@tauri-apps/plugin-updater";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { formatBytes, formatDate } from "@/lib/format";
 import {
   cancelBackgroundTask,
   deleteResource,
+  deleteSession,
   deleteTranscriptionModel,
   downloadTranscriptionModel,
   getRuntimeStatus,
@@ -41,8 +45,14 @@ import type {
 import { useProcessingSettings } from "@/hooks/useProcessingSettings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 type SettingsPanelId = "overview" | "transcription" | "models" | "storage" | "tasks" | "gaps";
+
+type PendingSettingsDelete =
+  | { kind: "resource"; resource: ResourceItem }
+  | { kind: "model"; modelId: string }
+  | null;
 
 interface SettingsPageProps {
   isOpen: boolean;
@@ -106,6 +116,13 @@ const productGaps = [
     detail: "Reprocess is available, but failed tasks need clearer causes, logs, and one-click dependency fixes.",
   },
 ];
+
+interface UpdateProgress {
+  downloadedBytes: number;
+  totalBytes: number | null;
+}
+
+type UpdateStatus = "idle" | "checking" | "available" | "none" | "installing" | "installed" | "error";
 
 function isActiveTask(task: BackgroundTask) {
   return task.status === "queued" || task.status === "running";
@@ -219,21 +236,32 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
   const [resourceOverview, setResourceOverview] = useState<ResourceOverview | null>(null);
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [models, setModels] = useState<ManagedTranscriptionModel[]>([]);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress>({
+    downloadedBytes: 0,
+    totalBytes: null,
+  });
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<PendingSettingsDelete>(null);
 
   const refresh = useCallback(async () => {
-    const [nextRuntimeStatus, nextResourceOverview, nextTasks, nextModels] =
+    const [nextRuntimeStatus, nextResourceOverview, nextTasks, nextModels, nextAppVersion] =
       await Promise.all([
         getRuntimeStatus(),
         listResources(),
         listBackgroundTasks(),
         listAvailableTranscriptionModels(),
+        getVersion(),
       ]);
     setRuntimeStatus(nextRuntimeStatus);
     setResourceOverview(nextResourceOverview);
     setTasks(nextTasks);
     setModels(nextModels);
+    setAppVersion(nextAppVersion);
     setError(null);
   }, []);
 
@@ -264,6 +292,9 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
     }
 
     function handleKeyDown(event: KeyboardEvent) {
+      if (pendingDelete) {
+        return;
+      }
       if (event.key === "Escape") {
         onClose();
       }
@@ -271,7 +302,7 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, pendingDelete]);
 
   const installedCount = models.filter((model) => model.installed).length;
   const preferredModelLabel =
@@ -303,15 +334,23 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
   }
 
   async function handleDeleteResource(resource: ResourceItem) {
-    if (!window.confirm(`Delete ${resource.label}?`)) {
-      return;
-    }
-
     setBusyId(resource.id);
     try {
+      if (resource.kind === "sessionDir" && resource.sessionId) {
+        await deleteSession(resource.sessionId);
+        await refresh();
+        window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
+        setPendingDelete(null);
+        return;
+      }
+
       const nextOverview = await deleteResource(resource.path, resource.sessionId, resource.modelId);
       setResourceOverview(nextOverview);
       await refresh();
+      if (resource.kind === "sessionDir") {
+        window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
+      }
+      setPendingDelete(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to delete resource.");
     } finally {
@@ -333,10 +372,6 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
   }
 
   async function handleDeleteModel(modelId: string) {
-    if (!window.confirm(`Delete ${modelId}?`)) {
-      return;
-    }
-
     setBusyId(modelId);
     try {
       await deleteTranscriptionModel(modelId);
@@ -344,10 +379,88 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
         await updateSettings({ preferredModelId: null });
       }
       await refresh();
+      setPendingDelete(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to delete model.");
     } finally {
       setBusyId(null);
+    }
+  }
+
+  async function handleConfirmDelete() {
+    if (!pendingDelete) {
+      return;
+    }
+
+    if (pendingDelete.kind === "resource") {
+      await handleDeleteResource(pendingDelete.resource);
+      return;
+    }
+
+    await handleDeleteModel(pendingDelete.modelId);
+  }
+
+  function handleUpdateDownloadEvent(event: DownloadEvent) {
+    if (event.event === "Started") {
+      setUpdateProgress({
+        downloadedBytes: 0,
+        totalBytes: event.data.contentLength ?? null,
+      });
+      return;
+    }
+
+    if (event.event === "Progress") {
+      setUpdateProgress((current) => ({
+        ...current,
+        downloadedBytes: current.downloadedBytes + event.data.chunkLength,
+      }));
+      return;
+    }
+
+    setUpdateProgress((current) => ({
+      ...current,
+      downloadedBytes: current.totalBytes ?? current.downloadedBytes,
+    }));
+  }
+
+  async function handleCheckForUpdate() {
+    setUpdateStatus("checking");
+    setUpdateMessage(null);
+    setError(null);
+    try {
+      const update = await check({ timeout: 30_000 });
+      setPendingUpdate(update);
+      setUpdateProgress({ downloadedBytes: 0, totalBytes: null });
+      if (update) {
+        setUpdateStatus("available");
+        setUpdateMessage(`Version ${update.version} is available.`);
+      } else {
+        setUpdateStatus("none");
+        setUpdateMessage("Leclog is up to date.");
+      }
+    } catch (reason) {
+      setUpdateStatus("error");
+      setUpdateMessage(reason instanceof Error ? reason.message : "Failed to check for updates.");
+    }
+  }
+
+  async function handleInstallUpdate() {
+    if (!pendingUpdate) {
+      return;
+    }
+
+    setUpdateStatus("installing");
+    setUpdateMessage(null);
+    setError(null);
+    try {
+      await pendingUpdate.downloadAndInstall(handleUpdateDownloadEvent, { timeout: 120_000 });
+      setUpdateStatus("installed");
+      setUpdateMessage("Update installed. Restart Leclog to finish.");
+      await pendingUpdate.close();
+      setPendingUpdate(null);
+    } catch (reason) {
+      setUpdateStatus("error");
+      setUpdateMessage(reason instanceof Error ? reason.message : "Failed to install update.");
     }
   }
 
@@ -368,6 +481,12 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
   }
 
   const isBusy = busyId !== null;
+  const updatePercent =
+    updateProgress.totalBytes && updateProgress.totalBytes > 0
+      ? Math.min(100, Math.round((updateProgress.downloadedBytes / updateProgress.totalBytes) * 100))
+      : updateStatus === "installed"
+        ? 100
+        : 0;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/25 backdrop-blur-[2px]" role="dialog" aria-modal="true">
@@ -452,6 +571,63 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
                     detail={runtimeStatus?.whisperCliPath ?? undefined}
                   />
                   <Stat label="Active tasks" value={String(activeTaskCount)} detail={`${tasks.length} tracked`} />
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-950">Software update</p>
+                      <p className="mt-0.5 truncate text-xs text-slate-500">
+                        Current version {appVersion ?? "unknown"} · GitHub Releases channel
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={updateStatus === "checking" || updateStatus === "installing"}
+                        onClick={() => void handleCheckForUpdate()}
+                      >
+                        <RefreshCw className="size-3.5" />
+                        {updateStatus === "checking" ? "Checking" : "Check"}
+                      </Button>
+                      {pendingUpdate ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={updateStatus === "installing"}
+                          onClick={() => void handleInstallUpdate()}
+                        >
+                          <Download className="size-3.5" />
+                          {updateStatus === "installing" ? "Installing" : "Install"}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                  {updateStatus === "installing" ? (
+                    <div className="mt-3">
+                      <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
+                        <div className="h-full rounded-full bg-slate-950" style={{ width: `${updatePercent}%` }} />
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {updateProgress.totalBytes
+                          ? `${formatBytes(updateProgress.downloadedBytes)} / ${formatBytes(updateProgress.totalBytes)}`
+                          : "Downloading update..."}
+                      </p>
+                    </div>
+                  ) : null}
+                  {updateMessage ? (
+                    <p
+                      className={[
+                        "mt-2 rounded-lg px-3 py-2 text-sm",
+                        updateStatus === "error"
+                          ? "bg-red-50 text-red-700"
+                          : "bg-slate-50 text-slate-600",
+                      ].join(" ")}
+                    >
+                      {updateMessage}
+                    </p>
+                  ) : null}
                 </div>
                 {runtimeStatus?.issues.length ? (
                   <div className="grid gap-2">
@@ -659,7 +835,10 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
                               variant="destructive"
                               size="icon-sm"
                               title="Delete model"
-                              onClick={() => void handleDeleteModel(model.id)}
+                              onClick={() => {
+                                setError(null);
+                                setPendingDelete({ kind: "model", modelId: model.id });
+                              }}
                             >
                               <Trash2 className="size-3.5" />
                             </Button>
@@ -695,7 +874,10 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
                         resource={resource}
                         onCopy={(path) => void handleCopy(path)}
                         onReveal={(path) => void handleReveal(path)}
-                        onDelete={(nextResource) => void handleDeleteResource(nextResource)}
+                        onDelete={(nextResource) => {
+                          setError(null);
+                          setPendingDelete({ kind: "resource", resource: nextResource });
+                        }}
                       />
                     ))
                   )}
@@ -764,6 +946,46 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
           </div>
         </div>
       </aside>
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={
+          pendingDelete?.kind === "resource"
+            ? pendingDelete.resource.kind === "sessionDir"
+              ? "Delete session?"
+              : `Delete ${pendingDelete.resource.label}?`
+            : "Delete model?"
+        }
+        description={
+          pendingDelete?.kind === "resource"
+            ? pendingDelete.resource.kind === "sessionDir"
+              ? "This removes the session record and all Leclog-managed files for it."
+              : "This removes the selected Leclog-managed app resource."
+            : "This removes the local Whisper model file managed by Leclog."
+        }
+        details={
+          pendingDelete?.kind === "resource"
+            ? [pendingDelete.resource.path]
+            : pendingDelete?.kind === "model"
+              ? [pendingDelete.modelId]
+              : []
+        }
+        confirmLabel={
+          pendingDelete?.kind === "resource"
+            ? pendingDelete.resource.kind === "sessionDir"
+              ? "Delete session"
+              : "Delete resource"
+            : "Delete model"
+        }
+        isBusy={isBusy}
+        error={error}
+        onCancel={() => {
+          if (!isBusy) {
+            setPendingDelete(null);
+            setError(null);
+          }
+        }}
+        onConfirm={() => void handleConfirmDelete()}
+      />
     </div>
   );
 }

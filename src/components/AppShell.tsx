@@ -1,5 +1,5 @@
 import type { PropsWithChildren } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, Clock3, FolderCog, Plus, Waves, XCircle } from "lucide-react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { formatDuration } from "@/lib/format";
@@ -149,6 +149,12 @@ export function AppShell({ children }: PropsWithChildren) {
       session.transcriptPhase === "live",
   );
 
+  const refreshShellData = useCallback(async () => {
+    const [result, nextTasks] = await Promise.all([listSessions(), listBackgroundTasks()]);
+    setSessions(result);
+    setTasks(nextTasks);
+  }, []);
+
   useEffect(() => {
     let isMounted = true;
 
@@ -165,6 +171,17 @@ export function AppShell({ children }: PropsWithChildren) {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    function handleSessionsChanged() {
+      void refreshShellData().catch(() => {});
+    }
+
+    window.addEventListener("leclog:sessions-changed", handleSessionsChanged);
+    return () => {
+      window.removeEventListener("leclog:sessions-changed", handleSessionsChanged);
+    };
+  }, [refreshShellData]);
 
   useSessionPolling({
     enabled: hasActiveProcessing,

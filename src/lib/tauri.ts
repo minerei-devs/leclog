@@ -215,6 +215,10 @@ export function listResources() {
   return invoke<ResourceOverview>("list_resources");
 }
 
+export function deleteSession(sessionId: string) {
+  return invoke<LectureSession[]>("delete_session", { sessionId });
+}
+
 export function deleteResource(
   path: string,
   sessionId?: string | null,

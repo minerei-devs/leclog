@@ -1389,6 +1389,75 @@ fn clear_deleted_session_resource(session: &mut LectureSession, path: &Path) -> 
 }
 
 #[tauri::command]
+pub fn delete_session(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    tasks: State<'_, TranscriptionTaskState>,
+    capture_state: State<'_, SystemAudioCaptureState>,
+    audio_meter: State<'_, AudioMeterState>,
+    session_id: String,
+) -> Result<Vec<LectureSession>, String> {
+    let session = state
+        .clone_sessions()?
+        .into_iter()
+        .find(|candidate| candidate.id == session_id)
+        .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
+
+    if session.status == SessionStatus::Recording {
+        return Err(String::from(
+            "Pause or stop recording before deleting this session.",
+        ));
+    }
+
+    let app_data_dir = storage::app_data_dir(&app)
+        .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
+    let fallback_session_dir = storage::session_dir_path(&app, &session_id)
+        .map_err(|error| format!("Failed to resolve session directory: {error}"))?;
+    let session_dir = session
+        .session_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .unwrap_or(fallback_session_dir);
+
+    let _ = tasks.cancel_session_tasks(&session_id);
+    let _ = capture_state.remove(&session_id);
+    let _ = audio_meter.remove(&session_id);
+
+    if session_dir.exists() {
+        if session_dir == app_data_dir {
+            return Err(String::from(
+                "The app data root cannot be deleted from here.",
+            ));
+        }
+        if !storage::is_inside_app_data(&app, &session_dir)
+            .map_err(|error| format!("Failed to validate session directory: {error}"))?
+        {
+            return Err(String::from(
+                "Only Leclog app session directories can be deleted.",
+            ));
+        }
+        fs::remove_dir_all(&session_dir)
+            .map_err(|error| format!("Failed to delete session directory: {error}"))?;
+    }
+
+    let (remaining_sessions, snapshot) = state.mutate(|sessions| {
+        let original_count = sessions.len();
+        sessions.retain(|session| session.id != session_id);
+        if sessions.len() == original_count {
+            return Err(String::from("Session not found."));
+        }
+        Ok(sessions.clone())
+    })?;
+    persist_snapshot(&app, &snapshot)?;
+
+    Ok(remaining_sessions
+        .iter()
+        .map(present_session)
+        .collect::<Vec<_>>())
+}
+
+#[tauri::command]
 pub fn list_resources(
     app: AppHandle,
     state: State<'_, SessionState>,

@@ -14,6 +14,7 @@ use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|app| {
@@ -67,6 +68,7 @@ fn main() {
             commands::session_commands::get_session,
             commands::session_commands::get_runtime_status,
             commands::session_commands::list_resources,
+            commands::session_commands::delete_session,
             commands::session_commands::delete_resource,
             commands::session_commands::reveal_resource,
             commands::session_commands::list_background_tasks,

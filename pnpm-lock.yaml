@@ -26,6 +26,9 @@ importers:
       '@tauri-apps/plugin-store':
         specifier: ^2.4.0
         version: 2.4.2
+      '@tauri-apps/plugin-updater':
+        specifier: ~2.10.1
+        version: 2.10.1
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -1511,6 +1514,9 @@ packages:
 
   '@tauri-apps/plugin-store@2.4.2':
     resolution: {integrity: sha512-0ClHS50Oq9HEvLPhNzTNFxbWVOqoAp3dRvtewQBeqfIQ0z5m3JRnOISIn2ZVPCrQC0MyGyhTS9DWhHjpigQE7A==}
+
+  '@tauri-apps/plugin-updater@2.10.1':
+    resolution: {integrity: sha512-NFYMg+tWOZPJdzE/PpFj2qfqwAWwNS3kXrb1tm1gnBJ9mYzZ4WDRrwy8udzWoAnfGCHLuePNLY1WVCNHnh3eRA==}
 
   '@ts-morph/common@0.27.0':
     resolution: {integrity: sha512-Wf29UqxWDpc+i61k3oIOzcUfQt79PIT9y/MWfAGlrkjg6lBC1hwDECLXPVJAhWjiGbfBCxZd65F/LIZF3+jeJQ==}
@@ -4330,6 +4336,10 @@ snapshots:
       '@tauri-apps/api': 2.10.1
 
   '@tauri-apps/plugin-store@2.4.2':
+    dependencies:
+      '@tauri-apps/api': 2.10.1
+
+  '@tauri-apps/plugin-updater@2.10.1':
     dependencies:
       '@tauri-apps/api': 2.10.1
 

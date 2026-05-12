@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
+import { Trash2 } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useRecentState } from "../hooks/useRecentState";
 import { useSessionPolling } from "../hooks/useSessionPolling";
 import { getErrorMessage } from "../lib/errors";
 import { formatDate, formatDuration } from "../lib/format";
 import { getCaptureSourceLabel } from "../lib/session";
-import { getSession, polishSessionTranscript } from "../lib/tauri";
+import { deleteSession, getSession, polishSessionTranscript } from "../lib/tauri";
 import type { LectureSession } from "../types/session";
+import { Button } from "./ui/button";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { SessionArtifacts } from "./SessionArtifacts";
 import { SessionStatsStrip } from "./SessionStatsStrip";
 import { StatusBadge } from "./StatusBadge";
@@ -19,7 +22,10 @@ export function SessionDetailPage() {
   const [session, setSession] = useState<LectureSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isPolishing, setIsPolishing] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!sessionId) {
@@ -105,7 +111,35 @@ export function SessionDetailPage() {
     }
   }
 
+  async function handleDeleteSession() {
+    if (!session) {
+      return;
+    }
+    if (session.status === "recording") {
+      setDeleteError("Pause or stop recording before deleting this session.");
+      return;
+    }
+
+    setError(null);
+    setDeleteError(null);
+    setIsDeleting(true);
+    try {
+      await deleteSession(session.id);
+      await updateRecentState({
+        activeSessionId: null,
+        lastViewedSessionId: null,
+      });
+      window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
+      navigate("/new", { replace: true });
+    } catch (reason) {
+      setDeleteError(getErrorMessage(reason, "Failed to delete this session."));
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   const sourceLabel = getCaptureSourceLabel(session.captureSource);
+  const canDeleteSession = session.status !== "recording";
   const detailStats = [
     {
       label: "Duration",
@@ -146,7 +180,27 @@ export function SessionDetailPage() {
             <p className="eyebrow">Session detail</p>
             <h2>{session.title}</h2>
           </div>
-          <StatusBadge status={session.status} />
+          <div className="session-top-actions">
+            <StatusBadge status={session.status} />
+            <Button
+              type="button"
+              variant="destructive"
+              size="icon-sm"
+              aria-label="Delete session"
+              title={
+                canDeleteSession
+                  ? "Delete this session and all Leclog-managed files."
+                  : "Pause recording before deleting."
+              }
+              disabled={isDeleting}
+              onClick={() => {
+                setDeleteError(null);
+                setIsDeleteDialogOpen(true);
+              }}
+            >
+              <Trash2 className="size-3.5" />
+            </Button>
+          </div>
         </div>
 
         <SessionStatsStrip items={detailStats} />
@@ -154,7 +208,13 @@ export function SessionDetailPage() {
         <SessionArtifacts
           session={session}
           onSessionUpdate={setSession}
-          onSessionDelete={() => navigate("/new")}
+          onSessionDelete={() => {
+            void updateRecentState({
+              activeSessionId: null,
+              lastViewedSessionId: null,
+            });
+            navigate("/new", { replace: true });
+          }}
         />
 
         {session.transcriptError ? <p className="error-banner">{session.transcriptError}</p> : null}
@@ -171,6 +231,31 @@ export function SessionDetailPage() {
         canPolish={session.segments.length > 0 && session.transcriptPhase === "ready"}
         isPolishing={isPolishing}
         onPolish={() => void handlePolishTranscript()}
+      />
+
+      <ConfirmDialog
+        open={isDeleteDialogOpen}
+        title="Delete session?"
+        description={
+          canDeleteSession
+            ? "This removes the session record and all Leclog-managed files for it. Any active processing task for this session will be canceled first."
+            : "This session is actively recording. Pause or stop recording before deleting it."
+        }
+        details={[
+          session.title,
+          session.sessionDir ?? "Managed session folder",
+        ]}
+        confirmLabel="Delete session"
+        isBusy={isDeleting}
+        confirmDisabled={!canDeleteSession}
+        error={deleteError}
+        onCancel={() => {
+          if (!isDeleting) {
+            setIsDeleteDialogOpen(false);
+            setDeleteError(null);
+          }
+        }}
+        onConfirm={() => void handleDeleteSession()}
       />
     </div>
   );
