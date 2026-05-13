@@ -11,6 +11,7 @@ import type { LectureSession } from "../types/session";
 import { Button } from "./ui/button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SessionArtifacts } from "./SessionArtifacts";
+import { SessionAudioReviewBar, type AudioSeekRequest } from "./SessionAudioReviewBar";
 import { SessionStatsStrip } from "./SessionStatsStrip";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptPanel } from "./TranscriptPanel";
@@ -27,11 +28,15 @@ export function SessionDetailPage() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<SessionDetailTab>("transcript");
+  const [activeTimeMs, setActiveTimeMs] = useState<number | null>(null);
+  const [seekRequest, setSeekRequest] = useState<AudioSeekRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     setActiveTab("transcript");
+    setActiveTimeMs(null);
+    setSeekRequest(null);
   }, [sessionId]);
 
   useEffect(() => {
@@ -147,6 +152,11 @@ export function SessionDetailPage() {
 
   const sourceLabel = getCaptureSourceLabel(session.captureSource);
   const canDeleteSession = session.status !== "recording";
+  const hasReviewAudio = Boolean(
+    session.normalizedAudioPath ||
+      session.livePreviewAudioPath ||
+      session.audioFilePaths.length > 0,
+  );
   const detailStats = [
     {
       label: "Duration",
@@ -242,14 +252,32 @@ export function SessionDetailPage() {
       </div>
 
       {activeTab === "transcript" ? (
-        <TranscriptPanel
-          segments={session.segments}
-          polishedTranscriptText={session.polishedTranscriptText}
-          emptyMessage="No transcript segments were saved for this session."
-          canPolish={session.segments.length > 0 && session.transcriptPhase === "ready"}
-          isPolishing={isPolishing}
-          onPolish={() => void handlePolishTranscript()}
-        />
+        <div className="grid gap-2">
+          <SessionAudioReviewBar
+            session={session}
+            currentTimeMs={activeTimeMs}
+            seekRequest={seekRequest}
+            onTimeChange={setActiveTimeMs}
+          />
+          <TranscriptPanel
+            segments={session.segments}
+            polishedTranscriptText={session.polishedTranscriptText}
+            emptyMessage="No transcript segments were saved for this session."
+            canPolish={session.segments.length > 0 && session.transcriptPhase === "ready"}
+            isPolishing={isPolishing}
+            activeTimeMs={activeTimeMs}
+            syncActiveTime={hasReviewAudio}
+            onPolish={() => void handlePolishTranscript()}
+            onSeek={
+              hasReviewAudio
+                ? (timeMs) => {
+                    setSeekRequest({ timeMs, requestedAt: Date.now() });
+                    setActiveTimeMs(timeMs);
+                  }
+                : undefined
+            }
+          />
+        </div>
       ) : (
         <SessionArtifacts
           session={session}

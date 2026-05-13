@@ -24,6 +24,7 @@ interface TranscriptPanelProps {
   canPolish?: boolean;
   isPolishing?: boolean;
   activeTimeMs?: number | null;
+  syncActiveTime?: boolean;
   onPolish?: () => void;
   onSeek?: (timeMs: number) => void;
 }
@@ -134,6 +135,7 @@ export function TranscriptPanel({
   canPolish = false,
   isPolishing = false,
   activeTimeMs = null,
+  syncActiveTime = false,
   onPolish,
   onSeek,
 }: TranscriptPanelProps) {
@@ -190,6 +192,19 @@ export function TranscriptPanel({
 
     rowVirtualizer.scrollToIndex(activeSearchChunkIndex, { align: "center" });
   }, [activeSearchChunkIndex, canSearchRows, rowVirtualizer]);
+
+  useEffect(() => {
+    if (
+      !syncActiveTime ||
+      !canSearchRows ||
+      searchQuery.trim() ||
+      activeTimeChunkIndex === null
+    ) {
+      return;
+    }
+
+    rowVirtualizer.scrollToIndex(activeTimeChunkIndex, { align: "center" });
+  }, [activeTimeChunkIndex, canSearchRows, rowVirtualizer, searchQuery, syncActiveTime]);
 
   async function handleCopyFullTranscript() {
     if (!copyTarget) {
@@ -261,6 +276,7 @@ export function TranscriptPanel({
                 style={{ transform: `translateY(${virtualRow.start}px)` }}
                 role={onSeek ? "button" : undefined}
                 tabIndex={onSeek ? 0 : undefined}
+                title={onSeek ? "Seek audio to this transcript row" : undefined}
                 onClick={() => onSeek?.(chunk.startMs)}
                 onKeyDown={(event) => {
                   if (!onSeek || (event.key !== "Enter" && event.key !== " ")) {
