@@ -182,6 +182,8 @@ export interface RuntimeStatus {
   ffmpegAvailable: boolean;
   whisperCliPath: string | null;
   whisperAvailable: boolean;
+  whisperAccelerationAvailable: boolean;
+  whisperAccelerationLabel: string | null;
   installedModelCount: number;
   installedModelLabels: string[];
   processingSessionCount: number;

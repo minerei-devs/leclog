@@ -391,7 +391,18 @@ a {
   font-size: 0.86rem;
 }
 
+.transcript-virtual-scroll {
+  contain: layout paint style;
+  overscroll-behavior: contain;
+}
+
+.transcript-virtual-row {
+  backface-visibility: hidden;
+  contain: layout paint style;
+}
+
 .timeline-active-text {
+  position: relative;
   color: #1e3a8a;
   animation: timeline-text-highlight 900ms ease-out;
 }

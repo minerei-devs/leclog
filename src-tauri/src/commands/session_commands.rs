@@ -1301,6 +1301,52 @@ fn command_available(path: &Path, help_arg: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn parse_whisper_acceleration_log(log: &str) -> (bool, Option<String>) {
+    let gpu_name = log.lines().find_map(|line| {
+        line.split_once("GPU name:")
+            .map(|(_, value)| value.trim())
+            .filter(|value| !value.is_empty())
+    });
+
+    if log.contains("loaded MTL backend") || log.contains("ggml_metal_device_init") {
+        return (
+            true,
+            Some(match gpu_name {
+                Some(name) => format!("Metal GPU ({name})"),
+                None => String::from("Metal GPU"),
+            }),
+        );
+    }
+
+    if log.contains("loaded CUDA backend") || log.contains("ggml_cuda") {
+        return (true, Some(String::from("CUDA GPU")));
+    }
+
+    if log.contains("loaded Vulkan backend") || log.contains("ggml_vulkan") {
+        return (true, Some(String::from("Vulkan GPU")));
+    }
+
+    (false, Some(String::from("CPU only")))
+}
+
+fn detect_whisper_acceleration(path: &Path, whisper_available: bool) -> (bool, Option<String>) {
+    if !whisper_available {
+        return (false, None);
+    }
+
+    Command::new(path)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .output()
+        .map(|output| {
+            let mut log = String::from_utf8_lossy(&output.stdout).into_owned();
+            log.push('\n');
+            log.push_str(&String::from_utf8_lossy(&output.stderr));
+            parse_whisper_acceleration_log(&log)
+        })
+        .unwrap_or((false, Some(String::from("Unknown"))))
+}
+
 #[tauri::command]
 pub fn get_runtime_status(
     app: AppHandle,
@@ -1318,6 +1364,8 @@ pub fn get_runtime_status(
     let whisper_cli_path = storage::resolve_whisper_cli_path(&app);
     let ffmpeg_available = command_available(&ffmpeg_path, "-version");
     let whisper_available = command_available(&whisper_cli_path, "--help");
+    let (whisper_acceleration_available, whisper_acceleration_label) =
+        detect_whisper_acceleration(&whisper_cli_path, whisper_available);
     let installed_models = storage::list_transcription_models(&app)
         .map_err(|error| format!("Failed to list transcription models: {error}"))?;
     let sessions = state.clone_sessions()?;
@@ -1353,6 +1401,8 @@ pub fn get_runtime_status(
         ffmpeg_available,
         whisper_cli_path: Some(whisper_cli_path.display().to_string()),
         whisper_available,
+        whisper_acceleration_available,
+        whisper_acceleration_label,
         installed_model_count: installed_models.len(),
         installed_model_labels: installed_models
             .into_iter()
@@ -2007,5 +2057,24 @@ mod tests {
         assert!(!matched);
         assert!(session.normalized_audio_path.is_some());
         assert!(session.polished_transcript_text.is_some());
+    }
+
+    #[test]
+    fn detects_metal_whisper_acceleration() {
+        let (available, label) = parse_whisper_acceleration_log(
+            "ggml_metal_device_init: GPU name:   MTL0\nload_backend: loaded MTL backend",
+        );
+
+        assert!(available);
+        assert_eq!(label.as_deref(), Some("Metal GPU (MTL0)"));
+    }
+
+    #[test]
+    fn reports_cpu_only_whisper_acceleration() {
+        let (available, label) =
+            parse_whisper_acceleration_log("load_backend: loaded CPU backend");
+
+        assert!(!available);
+        assert_eq!(label.as_deref(), Some("CPU only"));
     }
 }

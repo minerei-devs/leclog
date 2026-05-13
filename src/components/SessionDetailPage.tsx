@@ -30,6 +30,7 @@ export function SessionDetailPage() {
   const [activeTab, setActiveTab] = useState<SessionDetailTab>("content");
   const [activeTimeMs, setActiveTimeMs] = useState<number | null>(null);
   const [seekRequest, setSeekRequest] = useState<AudioSeekRequest | null>(null);
+  const [followPlayback, setFollowPlayback] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -37,6 +38,7 @@ export function SessionDetailPage() {
     setActiveTab("content");
     setActiveTimeMs(null);
     setSeekRequest(null);
+    setFollowPlayback(true);
   }, [sessionId]);
 
   useEffect(() => {
@@ -264,6 +266,26 @@ export function SessionDetailPage() {
           />
         ) : activeTab === "timeline" ? (
           <>
+            <div className="flex shrink-0 items-center justify-end">
+              <Button
+                type="button"
+                variant={followPlayback ? "outline" : "ghost"}
+                size="sm"
+                aria-pressed={followPlayback}
+                title={
+                  followPlayback
+                    ? "Timeline follows the current playback position. Manual scrolling pauses it."
+                    : "Resume automatic scrolling to the current playback position."
+                }
+                disabled={!hasReviewAudio}
+                onClick={() => setFollowPlayback((current) => !current)}
+              >
+                Follow playback
+                <span className="ml-1 text-[11px] font-semibold tabular-nums">
+                  {followPlayback ? "On" : "Off"}
+                </span>
+              </Button>
+            </div>
             <div className="shrink-0">
               <SessionAudioReviewBar
                 session={session}
@@ -278,13 +300,15 @@ export function SessionDetailPage() {
               emptyMessage="No transcript segments were saved for this session."
               canPolish={false}
               activeTimeMs={activeTimeMs}
-              syncActiveTime={hasReviewAudio}
+              syncActiveTime={hasReviewAudio && followPlayback}
               activeView="timeline"
               hideViewTabs
               fillAvailable
+              onTimelineUserScroll={() => setFollowPlayback(false)}
               onSeek={
                 hasReviewAudio
                   ? (timeMs) => {
+                      setFollowPlayback(true);
                       setSeekRequest({ timeMs, requestedAt: Date.now() });
                       setActiveTimeMs(timeMs);
                     }

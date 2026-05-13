@@ -325,6 +325,8 @@ pub struct RuntimeStatus {
     pub ffmpeg_available: bool,
     pub whisper_cli_path: Option<String>,
     pub whisper_available: bool,
+    pub whisper_acceleration_available: bool,
+    pub whisper_acceleration_label: Option<String>,
     pub installed_model_count: usize,
     pub installed_model_labels: Vec<String>,
     pub processing_session_count: usize,

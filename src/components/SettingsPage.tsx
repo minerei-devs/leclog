@@ -598,7 +598,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
                     )
                   }
                 />
-                <div className="grid gap-2 md:grid-cols-4">
+                <div className="grid gap-2 md:grid-cols-5">
                   <Stat
                     label="App data"
                     value={runtimeStatus?.isAppDataWritable ? "Writable" : "Blocked"}
@@ -613,6 +613,17 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
                     label="whisper-cli"
                     value={runtimeStatus?.whisperAvailable ? "Available" : "Missing"}
                     detail={runtimeStatus?.whisperCliPath ?? undefined}
+                  />
+                  <Stat
+                    label="Acceleration"
+                    value={
+                      runtimeStatus?.whisperAvailable
+                        ? runtimeStatus.whisperAccelerationAvailable
+                          ? "GPU"
+                          : "CPU"
+                        : "Missing"
+                    }
+                    detail={runtimeStatus?.whisperAccelerationLabel ?? undefined}
                   />
                   <Stat label="Active tasks" value={String(activeTaskCount)} detail={`${tasks.length} tracked`} />
                 </div>

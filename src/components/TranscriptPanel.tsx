@@ -32,6 +32,7 @@ interface TranscriptPanelProps {
   fillAvailable?: boolean;
   onPolish?: () => void;
   onSeek?: (timeMs: number) => void;
+  onTimelineUserScroll?: () => void;
   onActiveViewChange?: (view: TranscriptPanelView) => void;
 }
 
@@ -148,6 +149,7 @@ export function TranscriptPanel({
   fillAvailable = false,
   onPolish,
   onSeek,
+  onTimelineUserScroll,
   onActiveViewChange,
 }: TranscriptPanelProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
@@ -157,6 +159,8 @@ export function TranscriptPanel({
   const [searchQuery, setSearchQuery] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const scrollParentRef = useRef<HTMLDivElement | null>(null);
+  const isProgrammaticScrollRef = useRef(false);
+  const programmaticScrollResetRef = useRef<number | null>(null);
   const sentenceChunks = useMemo(() => buildTranscriptSentenceChunks(segments), [segments]);
   const rawTranscript = useMemo(
     () => joinTranscriptSentenceChunks(sentenceChunks),
@@ -194,15 +198,48 @@ export function TranscriptPanel({
     overscan: 8,
   });
 
+  function markProgrammaticScroll() {
+    isProgrammaticScrollRef.current = true;
+    if (programmaticScrollResetRef.current !== null) {
+      window.clearTimeout(programmaticScrollResetRef.current);
+    }
+    programmaticScrollResetRef.current = window.setTimeout(() => {
+      isProgrammaticScrollRef.current = false;
+      programmaticScrollResetRef.current = null;
+    }, 420);
+  }
+
+  function handleTranscriptScroll() {
+    if (
+      resolvedView !== "timeline" ||
+      !syncActiveTime ||
+      isProgrammaticScrollRef.current
+    ) {
+      return;
+    }
+
+    onTimelineUserScroll?.();
+  }
+
   useEffect(() => {
     setActiveMatchIndex(0);
   }, [searchQuery, resolvedView]);
+
+  useEffect(
+    () => () => {
+      if (programmaticScrollResetRef.current !== null) {
+        window.clearTimeout(programmaticScrollResetRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!canSearchRows || activeSearchChunkIndex === null) {
       return;
     }
 
+    markProgrammaticScroll();
     rowVirtualizer.scrollToIndex(activeSearchChunkIndex, { align: "center" });
   }, [activeSearchChunkIndex, canSearchRows, rowVirtualizer]);
 
@@ -216,6 +253,7 @@ export function TranscriptPanel({
       return;
     }
 
+    markProgrammaticScroll();
     rowVirtualizer.scrollToIndex(activeTimeChunkIndex, { align: "center" });
   }, [activeTimeChunkIndex, canSearchRows, rowVirtualizer, searchQuery, syncActiveTime]);
 
@@ -264,9 +302,10 @@ export function TranscriptPanel({
       <div
         ref={scrollParentRef}
         className={cn(
-          "relative min-w-0 rounded-lg border border-slate-200 bg-white",
+          "transcript-virtual-scroll relative min-w-0 rounded-lg border border-slate-200 bg-white",
           fillAvailable ? "min-h-0 flex-1 overflow-y-auto" : "max-h-[70vh] overflow-auto",
         )}
+        onScroll={handleTranscriptScroll}
       >
         <div
           className="relative w-full"
@@ -285,7 +324,7 @@ export function TranscriptPanel({
                 data-index={virtualRow.index}
                 ref={rowVirtualizer.measureElement}
                 className={[
-                  "absolute left-0 top-0 w-full border-b border-slate-100 px-3 py-2.5 transition-[background-color,box-shadow] duration-300 last:border-b-0",
+                  "transcript-virtual-row absolute left-0 top-0 w-full border-b border-slate-100 px-3 py-2.5 transition-[background-color,box-shadow] duration-300 last:border-b-0",
                   isActiveSearchHit
                     ? "bg-amber-50"
                     : isActiveTimeHit
@@ -297,7 +336,7 @@ export function TranscriptPanel({
                           : "bg-slate-50/70",
                   onSeek ? "cursor-pointer hover:bg-slate-50" : "",
                 ].join(" ")}
-                style={{ transform: `translateY(${virtualRow.start}px)` }}
+                style={{ transform: `translate3d(0, ${virtualRow.start}px, 0)` }}
                 role={onSeek ? "button" : undefined}
                 tabIndex={onSeek ? 0 : undefined}
                 title={onSeek ? "Seek audio to this transcript row" : undefined}

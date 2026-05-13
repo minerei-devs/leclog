@@ -136,6 +136,16 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
   const missingModel = runtimeStatus ? runtimeStatus.installedModelCount === 0 : false;
   const missingFfmpeg = runtimeStatus ? !runtimeStatus.ffmpegAvailable : false;
   const hasPartialDownloads = Boolean(runtimeStatus && runtimeStatus.partialDownloadCount > 0);
+  const accelerationBadge = !runtimeStatus
+    ? "Checking"
+    : !runtimeStatus.whisperAvailable
+      ? "Missing"
+      : runtimeStatus.whisperAccelerationAvailable
+        ? "GPU"
+        : "CPU";
+  const accelerationTone = Boolean(
+    runtimeStatus?.whisperAvailable && runtimeStatus.whisperAccelerationAvailable,
+  );
 
   return (
     <section className={["rounded-lg border border-slate-200 bg-white p-3 shadow-sm", className].join(" ")}>
@@ -155,7 +165,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
             </Badge>
           </div>
           <p className="mt-1 text-xs text-slate-500">
-            ffmpeg ships with the macOS app. Whisper can use an app sidecar or Homebrew. Models are downloaded into app data.
+            ffmpeg ships with the macOS app. Whisper uses GPU acceleration when the detected sidecar or Homebrew build exposes it.
           </p>
         </div>
 
@@ -170,7 +180,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
         </div>
       </div>
 
-      <div className="mt-3 grid gap-2 md:grid-cols-3">
+      <div className="mt-3 grid gap-2 md:grid-cols-4">
         <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-2.5 py-2">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-medium text-slate-700">ffmpeg</span>
@@ -192,6 +202,24 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
           </div>
           <p className="mt-1 truncate text-xs text-slate-500" title={runtimeStatus?.whisperCliPath ?? undefined}>
             {runtimeSource(runtimeStatus?.whisperCliPath ?? null, "whisper-cli")}
+          </p>
+        </div>
+
+        <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-2.5 py-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-slate-700">Acceleration</span>
+            <Badge
+              variant="outline"
+              className={[
+                "rounded-full px-2 text-[10px]",
+                readinessTone(accelerationTone),
+              ].join(" ")}
+            >
+              {accelerationBadge}
+            </Badge>
+          </div>
+          <p className="mt-1 truncate text-xs text-slate-500" title={runtimeStatus?.whisperAccelerationLabel ?? undefined}>
+            {runtimeStatus?.whisperAccelerationLabel ?? "Unknown"}
           </p>
         </div>
 
