@@ -16,7 +16,7 @@ import { SessionStatsStrip } from "./SessionStatsStrip";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptPanel } from "./TranscriptPanel";
 
-type SessionDetailTab = "transcript" | "resources";
+type SessionDetailTab = "transcript" | "resources" | "details";
 
 export function SessionDetailPage() {
   const navigate = useNavigate();
@@ -157,6 +157,11 @@ export function SessionDetailPage() {
       session.livePreviewAudioPath ||
       session.audioFilePaths.length > 0,
   );
+  const tabs = [
+    { id: "transcript" as const, label: "Transcript" },
+    { id: "resources" as const, label: "Resources" },
+    { id: "details" as const, label: "Details" },
+  ];
   const detailStats = [
     {
       label: "Duration",
@@ -191,13 +196,18 @@ export function SessionDetailPage() {
 
   return (
     <div className="grid gap-3">
-      <section className="session-side-panel">
-        <div className="session-topline">
-          <div className="session-title-stack">
+      <section className="sticky top-0 z-30 -mx-5 -mt-5 border-b border-slate-200/80 bg-slate-50/90 px-5 pt-4 backdrop-blur-xl">
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
             <p className="eyebrow">Session detail</p>
-            <h2>{session.title}</h2>
+            <h2 className="mt-1 truncate text-lg font-semibold tracking-tight text-slate-950">
+              {session.title}
+            </h2>
+            <p className="mt-1 truncate text-xs text-slate-500" title={`${sourceLabel} · ${formatDuration(session.durationMs)} · ${session.transcriptPhase}`}>
+              {sourceLabel} · {formatDuration(session.durationMs)} · {session.transcriptPhase}
+            </p>
           </div>
-          <div className="session-top-actions">
+          <div className="flex shrink-0 items-center gap-1.5 pt-0.5">
             <StatusBadge status={session.status} />
             <Button
               type="button"
@@ -220,36 +230,24 @@ export function SessionDetailPage() {
           </div>
         </div>
 
-        <SessionStatsStrip items={detailStats} />
-
-        {session.transcriptError ? <p className="error-banner">{session.transcriptError}</p> : null}
-      </section>
-
-      <div className="rounded-lg border border-slate-200 bg-white p-1 shadow-sm">
-        <div className="grid grid-cols-2 gap-1">
-          {[
-            { id: "transcript" as const, label: "Transcript", detail: "Session content" },
-            { id: "resources" as const, label: "Resources", detail: "Files and artifacts" },
-          ].map((tab) => (
+        <nav className="mt-3 flex min-w-0 items-end gap-1 overflow-x-auto" aria-label="Session detail sections">
+          {tabs.map((tab) => (
             <button
               key={tab.id}
               type="button"
               className={[
-                "rounded-md px-3 py-2 text-left transition-colors",
+                "relative h-9 shrink-0 border-b-2 px-3 text-sm font-medium transition-colors",
                 activeTab === tab.id
-                  ? "bg-slate-950 text-white shadow-sm"
-                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-950",
+                  ? "border-slate-950 text-slate-950"
+                  : "border-transparent text-slate-500 hover:text-slate-900",
               ].join(" ")}
               onClick={() => setActiveTab(tab.id)}
             >
-              <span className="block text-sm font-semibold">{tab.label}</span>
-              <span className={activeTab === tab.id ? "block text-[11px] text-slate-300" : "block text-[11px] text-slate-500"}>
-                {tab.detail}
-              </span>
+              {tab.label}
             </button>
           ))}
-        </div>
-      </div>
+        </nav>
+      </section>
 
       {activeTab === "transcript" ? (
         <div className="grid gap-2">
@@ -278,7 +276,7 @@ export function SessionDetailPage() {
             }
           />
         </div>
-      ) : (
+      ) : activeTab === "resources" ? (
         <SessionArtifacts
           session={session}
           onSessionUpdate={setSession}
@@ -290,6 +288,11 @@ export function SessionDetailPage() {
             navigate("/new", { replace: true });
           }}
         />
+      ) : (
+        <section className="session-side-panel">
+          <SessionStatsStrip items={detailStats} />
+          {session.transcriptError ? <p className="error-banner">{session.transcriptError}</p> : null}
+        </section>
       )}
 
       <ConfirmDialog

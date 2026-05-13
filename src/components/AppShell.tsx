@@ -1,6 +1,18 @@
 import type { PropsWithChildren } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, ArrowUpRight, Clock3, FolderCog, FolderSearch, Plus, RotateCcw, Waves, XCircle } from "lucide-react";
+import {
+  Activity,
+  ArrowUpRight,
+  Clock3,
+  FolderCog,
+  FolderSearch,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  RotateCcw,
+  Waves,
+  XCircle,
+} from "lucide-react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { check } from "@tauri-apps/plugin-updater";
 import { formatDuration } from "@/lib/format";
@@ -49,6 +61,22 @@ function sessionBadgeClass(session: LectureSession) {
   }
 
   return "border-slate-200 bg-slate-100 text-slate-600";
+}
+
+function sessionDotClass(session: LectureSession) {
+  if (session.status === "recording") {
+    return "bg-red-500";
+  }
+  if (session.status === "processing" || session.transcriptPhase === "processing") {
+    return "bg-amber-500";
+  }
+  if (session.status === "paused") {
+    return "bg-orange-500";
+  }
+  if (session.status === "done") {
+    return "bg-emerald-500";
+  }
+  return "bg-slate-400";
 }
 
 function formatSidebarTime(date: string) {
@@ -157,6 +185,7 @@ export function AppShell({ children }: PropsWithChildren) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialPanel, setSettingsInitialPanel] = useState<SettingsPanelId>("overview");
   const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [taskPanelError, setTaskPanelError] = useState<string | null>(null);
   const [availableUpdateVersion, setAvailableUpdateVersion] = useState<string | null>(null);
@@ -361,49 +390,103 @@ export function AppShell({ children }: PropsWithChildren) {
 
   return (
     <div className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,rgba(170,201,243,0.22),transparent_28%),linear-gradient(180deg,#f8fafc_0%,#eef2f7_100%)] text-slate-950">
-      <div className="grid h-full grid-cols-[248px_minmax(0,1fr)]">
-        <aside className="flex h-screen flex-col border-r border-slate-200/80 bg-white/80 backdrop-blur-xl">
-          <div className="px-3 pb-3 pt-3.5">
-            <div className="mb-3.5">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-                Minerei
-              </p>
-              <h1 className="mt-1.5 text-xl font-semibold tracking-tight text-slate-950">
-                Leclog
-              </h1>
-              <p className="mt-0.5 truncate text-xs text-slate-500" title="Local-first lecture capture workspace.">
-                Local-first lecture capture workspace.
-              </p>
+      <div
+        className={cn(
+          "grid h-full transition-[grid-template-columns] duration-200",
+          isSidebarCollapsed
+            ? "grid-cols-[64px_minmax(0,1fr)]"
+            : "grid-cols-[248px_minmax(0,1fr)]",
+        )}
+      >
+        <aside
+          className={cn(
+            "flex h-screen min-w-0 flex-col border-r border-slate-200/80 bg-white/80 backdrop-blur-xl transition-[width] duration-200",
+            isSidebarCollapsed ? "w-16" : "w-[248px]",
+          )}
+        >
+          <div className={cn("pb-3 pt-3.5", isSidebarCollapsed ? "px-2" : "px-3")}>
+            <div className={cn("mb-3.5", isSidebarCollapsed ? "grid place-items-center gap-2" : "")}>
+              {isSidebarCollapsed ? (
+                <div className="flex size-9 items-center justify-center rounded-xl bg-slate-950 text-sm font-semibold text-white">
+                  L
+                </div>
+              ) : (
+                <div className="flex min-w-0 items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                      Minerei
+                    </p>
+                    <h1 className="mt-1.5 text-xl font-semibold tracking-tight text-slate-950">
+                      Leclog
+                    </h1>
+                    <p className="mt-0.5 truncate text-xs text-slate-500" title="Local-first lecture capture workspace.">
+                      Local-first lecture capture workspace.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Collapse sidebar"
+                    title="Collapse sidebar"
+                    onClick={() => setIsSidebarCollapsed(true)}
+                  >
+                    <PanelLeftClose className="size-4" />
+                  </Button>
+                </div>
+              )}
+              {isSidebarCollapsed ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Expand sidebar"
+                  title="Expand sidebar"
+                  onClick={() => setIsSidebarCollapsed(false)}
+                >
+                  <PanelLeftOpen className="size-4" />
+                </Button>
+              ) : null}
             </div>
 
             <div className="grid gap-1.5">
               <Link
-                className="inline-flex h-8.5 items-center justify-start gap-2 rounded-lg bg-slate-950 px-2.5 text-sm font-medium text-white transition-colors hover:bg-slate-900"
+                className={cn(
+                  "inline-flex h-8.5 items-center rounded-lg bg-slate-950 text-sm font-medium text-white transition-colors hover:bg-slate-900",
+                  isSidebarCollapsed ? "justify-center px-0" : "justify-start gap-2 px-2.5",
+                )}
                 to="/new"
+                aria-label="New session"
+                title="New session"
               >
                 <Plus className="size-4 text-white" />
-                <span className="text-white">New session</span>
+                {isSidebarCollapsed ? null : <span className="text-white">New session</span>}
               </Link>
 
               <Button
                 type="button"
                 variant="ghost"
-                className="h-8.5 justify-start rounded-lg px-2.5"
+                className={cn(
+                  "h-8.5 rounded-lg",
+                  isSidebarCollapsed ? "justify-center px-0" : "justify-start px-2.5",
+                )}
+                aria-label="Settings"
+                title="Settings"
                 onClick={() => {
                   setSettingsInitialPanel("overview");
                   setIsSettingsOpen(true);
                 }}
               >
                 <FolderCog className="size-4" />
-                Settings
-                {availableUpdateVersion ? (
+                {isSidebarCollapsed ? null : "Settings"}
+                {!isSidebarCollapsed && availableUpdateVersion ? (
                   <Badge
                     variant="outline"
                     className="ml-auto rounded-full border-orange-200 bg-orange-50 px-2 text-orange-700"
                   >
                     Update
                   </Badge>
-                ) : activeTaskCount > 0 ? (
+                ) : !isSidebarCollapsed && activeTaskCount > 0 ? (
                     <Badge
                       variant="outline"
                       className="ml-auto rounded-full border-blue-200 bg-blue-50 px-2 text-blue-700"
@@ -417,27 +500,49 @@ export function AppShell({ children }: PropsWithChildren) {
 
           <Separator />
 
-          <div className="flex items-center justify-between px-3 py-2.5">
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                Sessions
-              </p>
-              <p className="mt-0.5 text-xs text-slate-500">
-                {sortedSessions.length === 0
-                  ? "No local sessions yet"
-                  : `${sortedSessions.length} saved locally`}
-              </p>
-            </div>
-            <Badge variant="outline" className="rounded-full border-slate-200 px-2 py-0.5 text-[11px]">
-              {sortedSessions.length}
-            </Badge>
+          <div
+            className={cn(
+              "flex items-center py-2.5",
+              isSidebarCollapsed ? "justify-center px-2" : "justify-between px-3",
+            )}
+          >
+            {isSidebarCollapsed ? (
+              <Badge
+                variant="outline"
+                className="rounded-full border-slate-200 px-2 py-0.5 text-[11px]"
+                title={`${sortedSessions.length} saved sessions`}
+              >
+                {sortedSessions.length}
+              </Badge>
+            ) : (
+              <>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    Sessions
+                  </p>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    {sortedSessions.length === 0
+                      ? "No local sessions yet"
+                      : `${sortedSessions.length} saved locally`}
+                  </p>
+                </div>
+                <Badge variant="outline" className="rounded-full border-slate-200 px-2 py-0.5 text-[11px]">
+                  {sortedSessions.length}
+                </Badge>
+              </>
+            )}
           </div>
 
           <ScrollArea className="min-h-0 flex-1">
-            <div className="space-y-1.5 px-2 pb-4 pr-3">
+            <div className={cn("space-y-1.5 pb-4", isSidebarCollapsed ? "px-2" : "px-2 pr-3")}>
               {sortedSessions.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-3 py-4 text-xs text-slate-500">
-                  New sessions and imported media will appear here.
+                <div
+                  className={cn(
+                    "rounded-lg border border-dashed border-slate-200 bg-slate-50/70 text-xs text-slate-500",
+                    isSidebarCollapsed ? "h-9 px-0 py-0" : "px-3 py-4",
+                  )}
+                >
+                  {isSidebarCollapsed ? null : "New sessions and imported media will appear here."}
                 </div>
               ) : (
                 sortedSessions.map((session) => {
@@ -455,6 +560,36 @@ export function AppShell({ children }: PropsWithChildren) {
                     location.pathname === href ||
                     location.pathname.endsWith(`/session/${session.id}`) ||
                     location.pathname.endsWith(`/recording/${session.id}`);
+
+                  if (isSidebarCollapsed) {
+                    return (
+                      <NavLink
+                        key={session.id}
+                        to={href}
+                        className={cn(
+                          "relative mx-auto flex size-10 items-center justify-center rounded-xl border border-transparent text-slate-500 transition-colors hover:border-slate-200 hover:bg-slate-50",
+                          isActive && "border-slate-200 bg-white text-slate-950 shadow-sm",
+                        )}
+                        title={`${session.title} · ${getCaptureSourceLabel(session.captureSource)} · ${session.transcriptPhase}`}
+                      >
+                        <Waves className="size-4" />
+                        <span
+                          className={cn(
+                            "absolute right-1.5 top-1.5 size-2 rounded-full ring-2 ring-white",
+                            sessionDotClass(session),
+                          )}
+                        />
+                        {task ? (
+                          <span className="absolute inset-x-1 bottom-1 h-0.5 overflow-hidden rounded-full bg-slate-100">
+                            <span
+                              className={cn("block h-full rounded-full", sessionTaskTone(task))}
+                              style={{ width: `${taskPercent}%` }}
+                            />
+                          </span>
+                        ) : null}
+                      </NavLink>
+                    );
+                  }
 
                   return (
                     <NavLink
