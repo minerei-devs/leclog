@@ -17,8 +17,9 @@ use uuid::Uuid;
 
 use crate::{
     models::{
-        LectureSession, ManagedTranscriptionModel, ModelDownloadStatus, ProcessingQualityPreset,
-        ProcessingSettings, SessionStatus, TranscriptSegment, TranscriptionModelInfo,
+        BackgroundTask, LectureSession, ManagedTranscriptionModel, ModelDownloadStatus,
+        ProcessingQualityPreset, ProcessingSettings, SessionStatus, TaskFailureLog,
+        TranscriptSegment, TranscriptionModelInfo,
     },
     state::TranscriptionTaskState,
 };
@@ -35,6 +36,11 @@ const TRANSCRIPT_JSON_FILE_NAME: &str = "transcript.json";
 const LIVE_PREVIEW_AUDIO_FILE_NAME: &str = "live-preview.wav";
 const LIVE_TRANSCRIPT_JSON_FILE_NAME: &str = "live-transcript.json";
 const CHUNKS_DIR_NAME: &str = "chunks";
+const TASK_FAILURES_DIR_NAME: &str = "task-failures";
+const TASK_LOGS_DIR_NAME: &str = "logs/tasks";
+const TASK_FAILURE_LOG_FILE_NAME: &str = "latest.json";
+const TASK_STDERR_FILE_NAME: &str = "latest.stderr.log";
+const TASK_FAILURE_EXCERPT_BYTES: usize = 4 * 1024;
 const WAV_HEADER_LEN: u64 = 44;
 const DEFAULT_WHISPER_MODEL_FILE_NAMES: [&str; 8] = [
     "ggml-large-v3-turbo.bin",
@@ -68,6 +74,209 @@ pub fn app_data_dir(app: &AppHandle) -> Result<PathBuf> {
         .path()
         .app_local_data_dir()
         .context("Failed to resolve the local app data directory.")
+}
+
+fn sanitize_path_part(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn task_failure_scope(task: &BackgroundTask) -> String {
+    if let Some(session_id) = task.session_id.as_deref() {
+        return format!("session-{}", sanitize_path_part(session_id));
+    }
+    if let Some(model_id) = task.model_id.as_deref() {
+        return format!("model-{}", sanitize_path_part(model_id));
+    }
+    format!("task-{}", sanitize_path_part(&task.id))
+}
+
+fn task_failure_scope_path(app: &AppHandle, scope: &str) -> Result<PathBuf> {
+    Ok(app_data_dir(app)?
+        .join(TASK_FAILURES_DIR_NAME)
+        .join(format!("{scope}.json")))
+}
+
+fn task_log_dir(app: &AppHandle, task_id: &str) -> Result<PathBuf> {
+    Ok(app_data_dir(app)?
+        .join(TASK_LOGS_DIR_NAME)
+        .join(sanitize_path_part(task_id)))
+}
+
+fn task_failure_log_path(app: &AppHandle, task_id: &str) -> Result<PathBuf> {
+    Ok(task_log_dir(app, task_id)?.join(TASK_FAILURE_LOG_FILE_NAME))
+}
+
+fn task_stderr_path(app: &AppHandle, task_id: &str) -> Result<PathBuf> {
+    Ok(task_log_dir(app, task_id)?.join(TASK_STDERR_FILE_NAME))
+}
+
+fn command_summary(program_path: &Path, args: &[&str]) -> String {
+    let mut parts = vec![program_path.display().to_string()];
+    parts.extend(args.iter().map(|arg| (*arg).to_string()));
+    parts.join(" ")
+}
+
+fn read_tail_excerpt(path: &Path) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(path).with_context(|| format!("Failed to read {}.", path.display()))?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    let start = bytes.len().saturating_sub(TASK_FAILURE_EXCERPT_BYTES);
+    let excerpt = String::from_utf8_lossy(&bytes[start..])
+        .trim()
+        .to_string();
+    Ok((!excerpt.is_empty()).then_some(excerpt))
+}
+
+pub fn clear_task_failure_log(app: &AppHandle, task_id: &str) -> Result<()> {
+    let log_dir = task_log_dir(app, task_id)?;
+    if log_dir.exists() {
+        fs::remove_dir_all(&log_dir)
+            .with_context(|| format!("Failed to remove task log directory {}.", log_dir.display()))?;
+    }
+    Ok(())
+}
+
+fn clear_task_failure_scope(app: &AppHandle, scope: &str) -> Result<()> {
+    let path = task_failure_scope_path(app, scope)?;
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if let Ok(raw) = fs::read_to_string(&path) {
+        if let Ok(task) = serde_json::from_str::<BackgroundTask>(&raw) {
+            let _ = clear_task_failure_log(app, &task.id);
+        }
+    }
+
+    fs::remove_file(&path)
+        .with_context(|| format!("Failed to remove task failure {}.", path.display()))?;
+    Ok(())
+}
+
+pub fn clear_session_task_failure(app: &AppHandle, session_id: &str) -> Result<()> {
+    clear_task_failure_scope(app, &format!("session-{}", sanitize_path_part(session_id)))
+}
+
+pub fn clear_model_task_failure(app: &AppHandle, model_id: &str) -> Result<()> {
+    clear_task_failure_scope(app, &format!("model-{}", sanitize_path_part(model_id)))
+}
+
+pub fn write_task_command_failure_log(
+    app: &AppHandle,
+    task_id: &str,
+    command_label: &str,
+    program_path: &Path,
+    args: &[&str],
+    exit_code: Option<i32>,
+    stderr_path: Option<&Path>,
+    fallback_stderr: Option<&str>,
+) -> Result<TaskFailureLog> {
+    let log_path = task_failure_log_path(app, task_id)?;
+    ensure_parent_dir(&log_path)?;
+    let stderr_excerpt = stderr_path
+        .map(read_tail_excerpt)
+        .transpose()?
+        .flatten()
+        .or_else(|| fallback_stderr.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string));
+    let log = TaskFailureLog {
+        occurred_at: chrono::Utc::now().to_rfc3339(),
+        command_label: Some(command_label.to_string()),
+        command: Some(command_summary(program_path, args)),
+        exit_code,
+        stderr_excerpt,
+        log_path: Some(log_path.display().to_string()),
+        stderr_path: stderr_path.map(|path| path.display().to_string()),
+    };
+    let raw = serde_json::to_string_pretty(&log).context("Failed to serialize task failure log.")?;
+    fs::write(&log_path, raw)
+        .with_context(|| format!("Failed to write task failure log {}.", log_path.display()))?;
+    Ok(log)
+}
+
+pub fn write_task_error_log(
+    app: &AppHandle,
+    task_id: &str,
+    error: &str,
+) -> Result<TaskFailureLog> {
+    let log_path = task_failure_log_path(app, task_id)?;
+    ensure_parent_dir(&log_path)?;
+    let log = TaskFailureLog {
+        occurred_at: chrono::Utc::now().to_rfc3339(),
+        command_label: None,
+        command: None,
+        exit_code: None,
+        stderr_excerpt: Some(error.trim().to_string()),
+        log_path: Some(log_path.display().to_string()),
+        stderr_path: None,
+    };
+    let raw = serde_json::to_string_pretty(&log).context("Failed to serialize task failure log.")?;
+    fs::write(&log_path, raw)
+        .with_context(|| format!("Failed to write task failure log {}.", log_path.display()))?;
+    Ok(log)
+}
+
+pub fn read_task_failure_log(app: &AppHandle, task_id: &str) -> Result<Option<TaskFailureLog>> {
+    let path = task_failure_log_path(app, task_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read task failure log {}.", path.display()))?;
+    let log = serde_json::from_str::<TaskFailureLog>(&raw)
+        .with_context(|| format!("Failed to parse task failure log {}.", path.display()))?;
+    Ok(Some(log))
+}
+
+pub fn persist_failed_task(app: &AppHandle, task: &BackgroundTask) -> Result<()> {
+    let path = task_failure_scope_path(app, &task_failure_scope(task))?;
+    ensure_parent_dir(&path)?;
+    let raw = serde_json::to_string_pretty(task).context("Failed to serialize failed task.")?;
+    fs::write(&path, raw)
+        .with_context(|| format!("Failed to persist failed task {}.", path.display()))?;
+    Ok(())
+}
+
+pub fn list_persisted_failed_tasks(app: &AppHandle) -> Result<Vec<BackgroundTask>> {
+    let failures_dir = app_data_dir(app)?.join(TASK_FAILURES_DIR_NAME);
+    if !failures_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut tasks = Vec::new();
+    for entry in fs::read_dir(&failures_dir)
+        .with_context(|| format!("Failed to read task failures directory {}.", failures_dir.display()))?
+    {
+        let entry = entry.context("Failed to read task failure entry.")?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read task failure {}.", path.display()))?;
+        if let Ok(task) = serde_json::from_str::<BackgroundTask>(&raw) {
+            tasks.push(task);
+        }
+    }
+
+    Ok(tasks)
 }
 
 pub fn app_models_dir(app: &AppHandle) -> Result<PathBuf> {
@@ -673,16 +882,35 @@ fn run_command_with_optional_task(
         anyhow::bail!("{label} failed: {}", stderr.trim());
     }
 
+    let task_id = task_id.expect("task id was checked above");
+    clear_task_failure_log(app, task_id).ok();
+    let stderr_path = task_stderr_path(app, task_id)?;
+    ensure_parent_dir(&stderr_path)?;
+    let stderr_file = fs::File::create(&stderr_path)
+        .with_context(|| format!("Failed to create task stderr log {}.", stderr_path.display()))?;
     let mut child = Command::new(program_path)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
         .spawn()
-        .with_context(|| format!("Failed to launch {label} at {}.", program_path.display()))?;
+        .map_err(|error| {
+            let message = format!("Failed to launch {label} at {}: {error}", program_path.display());
+            let _ = write_task_command_failure_log(
+                app,
+                task_id,
+                label,
+                program_path,
+                args,
+                None,
+                Some(&stderr_path),
+                Some(&message),
+            );
+            anyhow::anyhow!(message)
+        })?;
 
     loop {
-        if is_task_canceled(app, task_id) {
+        if is_task_canceled(app, Some(task_id)) {
             let _ = child.kill();
             let _ = child.wait();
             anyhow::bail!("Task canceled.");
@@ -693,9 +921,20 @@ fn run_command_with_optional_task(
             .with_context(|| format!("Failed to wait for {label}."))?
         {
             if status.success() {
+                let _ = clear_task_failure_log(app, task_id);
                 return Ok(());
             }
 
+            let _ = write_task_command_failure_log(
+                app,
+                task_id,
+                label,
+                program_path,
+                args,
+                status.code(),
+                Some(&stderr_path),
+                None,
+            );
             anyhow::bail!("{label} failed with status {status}.");
         }
 
@@ -1802,6 +2041,13 @@ pub fn prepare_sessions_on_startup(app: &AppHandle, sessions: &mut [LectureSessi
             session.status = SessionStatus::Paused;
             session.last_resumed_at = None;
             finish_audio_segment(session);
+            changed = true;
+        }
+
+        if session.mark_processing_interrupted(
+            "Processing was interrupted because Leclog quit before the task finished.",
+        ) {
+            session.updated_at = chrono::Utc::now().to_rfc3339();
             changed = true;
         }
     }

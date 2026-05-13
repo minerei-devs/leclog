@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -101,6 +102,55 @@ fn persist_snapshot(app: &AppHandle, snapshot: &[LectureSession]) -> std::result
         .map_err(|error| format!("Failed to persist sessions: {error}"))
 }
 
+fn fail_task_with_persisted_log(
+    app: &AppHandle,
+    task_state: &TranscriptionTaskState,
+    task_id: &str,
+    error: String,
+) {
+    let failure_log = storage::read_task_failure_log(app, task_id)
+        .ok()
+        .flatten()
+        .or_else(|| storage::write_task_error_log(app, task_id, &error).ok());
+
+    if let Ok(failed_task) = task_state.fail_task(task_id, error, failure_log) {
+        let _ = storage::persist_failed_task(app, &failed_task);
+    }
+}
+
+fn background_task_scope(task: &BackgroundTask) -> String {
+    if let Some(session_id) = task.session_id.as_deref() {
+        return format!("session:{session_id}");
+    }
+    if let Some(model_id) = task.model_id.as_deref() {
+        return format!("model:{model_id}");
+    }
+    format!("task:{}", task.id)
+}
+
+fn mark_session_processing_interrupted(
+    app: &AppHandle,
+    session_id: &str,
+    transcript_error: &str,
+) -> std::result::Result<(), String> {
+    let (changed, snapshot) = app.state::<SessionState>().mutate(|sessions| {
+        let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
+            return Ok(false);
+        };
+
+        let changed = session.mark_processing_interrupted(transcript_error);
+        if changed {
+            session.updated_at = now_iso();
+        }
+        Ok(changed)
+    })?;
+
+    if changed {
+        persist_snapshot(app, &snapshot)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_processing_settings(
     app: &AppHandle,
@@ -161,10 +211,16 @@ pub(crate) fn spawn_final_transcription_job(
     let task_id = task.id.clone();
 
     std::thread::spawn(move || {
+        let _ = storage::clear_session_task_failure(&app_handle, &job_session_id);
         loop {
             let task_state = app_handle.state::<TranscriptionTaskState>();
             if task_state.is_canceled(&task_id).unwrap_or(false) {
                 let _ = task_state.cancel_task(&task_id);
+                let _ = mark_session_processing_interrupted(
+                    &app_handle,
+                    &job_session_id,
+                    "Transcription was canceled.",
+                );
                 let _ = task_state.finish_final(&job_session_id);
                 return;
             }
@@ -250,6 +306,7 @@ pub(crate) fn spawn_final_transcription_job(
                     .map_err(|error| format!("Failed to write polished transcript: {error}"))?;
             }
             persist_snapshot(&app_handle, &snapshot)?;
+            let _ = storage::clear_session_task_failure(&app_handle, &job_session_id);
             task_state
                 .succeed_task(&task_id, "Transcript ready")
                 .map_err(|error| format!("Failed to complete transcription task: {error}"))?;
@@ -262,20 +319,18 @@ pub(crate) fn spawn_final_transcription_job(
                 || error.to_ascii_lowercase().contains("canceled")
             {
                 let _ = task_state.cancel_task(&task_id);
+                let _ = mark_session_processing_interrupted(
+                    &app_handle,
+                    &job_session_id,
+                    "Transcription was canceled.",
+                );
             } else {
-                let _ = task_state.fail_task(&task_id, error.clone());
-            }
-
-            if let Ok((_, snapshot)) = app_handle.state::<SessionState>().mutate(|sessions| {
-                if let Some(session) = sessions.iter_mut().find(|session| session.id == job_session_id)
-                {
-                    session.transcript_phase = TranscriptPhase::Error;
-                    session.transcript_error = Some(error.clone());
-                    session.updated_at = now_iso();
-                }
-                Ok(())
-            }) {
-                let _ = persist_snapshot(&app_handle, &snapshot);
+                fail_task_with_persisted_log(&app_handle, &task_state, &task_id, error.clone());
+                let _ = mark_session_processing_interrupted(
+                    &app_handle,
+                    &job_session_id,
+                    &error,
+                );
             }
         }
 
@@ -536,6 +591,7 @@ pub fn download_transcription_model(
     let job_model_id = model_id.clone();
     let task_id = task.id.clone();
     std::thread::spawn(move || {
+        let _ = storage::clear_model_task_failure(&app_handle, &job_model_id);
         let task_state = app_handle.state::<TranscriptionTaskState>();
         let _ = task_state.start_task(&task_id, "Waiting for download slot");
         loop {
@@ -564,7 +620,7 @@ pub fn download_transcription_model(
                     Ok(true) => break,
                     Ok(false) => return,
                     Err(error) => {
-                        let _ = task_state.fail_task(&task_id, error);
+                        fail_task_with_persisted_log(&app_handle, &task_state, &task_id, error);
                         return;
                     }
                 }
@@ -605,6 +661,7 @@ pub fn download_transcription_model(
                 let _ = app_handle
                     .state::<ModelDownloadState>()
                     .complete(&job_model_id, path.display().to_string(), total_bytes);
+                let _ = storage::clear_model_task_failure(&app_handle, &job_model_id);
                 let _ = app_handle
                     .state::<TranscriptionTaskState>()
                     .succeed_task(&task_id, "Model installed");
@@ -619,7 +676,12 @@ pub fn download_transcription_model(
                 {
                     let _ = task_state.cancel_task(&task_id);
                 } else {
-                    let _ = task_state.fail_task(&task_id, error.to_string());
+                    fail_task_with_persisted_log(
+                        &app_handle,
+                        &task_state,
+                        &task_id,
+                        error.to_string(),
+                    );
                 }
             }
         }
@@ -636,6 +698,7 @@ pub fn delete_transcription_model(
 ) -> Result<(), String> {
     storage::delete_managed_transcription_model(&app, &model_id)
         .map_err(|error| format!("Failed to delete the local model: {error}"))?;
+    let _ = storage::clear_model_task_failure(&app, &model_id);
     downloads.clear(&model_id)?;
     Ok(())
 }
@@ -1423,6 +1486,7 @@ pub fn delete_session(
     let _ = tasks.cancel_session_tasks(&session_id);
     let _ = capture_state.remove(&session_id);
     let _ = audio_meter.remove(&session_id);
+    let _ = storage::clear_session_task_failure(&app, &session_id);
 
     if session_dir.exists() {
         if session_dir == app_data_dir {
@@ -1718,17 +1782,57 @@ pub fn reveal_resource(app: AppHandle, path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn list_background_tasks(
+    app: AppHandle,
     tasks: State<'_, TranscriptionTaskState>,
 ) -> Result<Vec<BackgroundTask>, String> {
-    tasks.list_tasks()
+    let mut current_tasks = tasks.list_tasks()?;
+    let existing_ids = current_tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<HashSet<_>>();
+    let active_scopes = current_tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                crate::models::BackgroundTaskStatus::Queued
+                    | crate::models::BackgroundTaskStatus::Running
+            )
+        })
+        .map(background_task_scope)
+        .collect::<HashSet<_>>();
+
+    for persisted_task in storage::list_persisted_failed_tasks(&app)
+        .map_err(|error| format!("Failed to list persisted task failures: {error}"))?
+    {
+        if existing_ids.contains(&persisted_task.id) {
+            continue;
+        }
+        if active_scopes.contains(&background_task_scope(&persisted_task)) {
+            continue;
+        }
+        current_tasks.push(persisted_task);
+    }
+
+    current_tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(current_tasks)
 }
 
 #[tauri::command]
 pub fn cancel_background_task(
+    app: AppHandle,
     tasks: State<'_, TranscriptionTaskState>,
     task_id: String,
 ) -> Result<BackgroundTask, String> {
-    tasks.cancel_task(&task_id)
+    let task = tasks.cancel_task(&task_id)?;
+    if let Some(session_id) = task.session_id.as_deref() {
+        let _ = mark_session_processing_interrupted(
+            &app,
+            session_id,
+            "Transcription was canceled.",
+        );
+    }
+    Ok(task)
 }
 
 #[tauri::command]

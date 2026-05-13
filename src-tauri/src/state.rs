@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::models::{
     BackgroundTask, BackgroundTaskKind, BackgroundTaskStatus, LectureSession,
-    ManagedTranscriptionModel, ModelDownloadStatus,
+    ManagedTranscriptionModel, ModelDownloadStatus, TaskFailureLog,
 };
 use crate::system_audio::SystemAudioCapture;
 
@@ -223,6 +223,7 @@ impl TranscriptionTaskState {
             downloaded_bytes: 0,
             total_bytes: None,
             error: None,
+            failure_log: None,
             session_id,
             model_id,
             created_at: timestamp.clone(),
@@ -283,6 +284,7 @@ impl TranscriptionTaskState {
                 task.total_bytes = total_bytes;
             }
             task.error = None;
+            task.failure_log = None;
         })
     }
 
@@ -292,19 +294,27 @@ impl TranscriptionTaskState {
             task.step = step.to_string();
             task.percent = 100.0;
             task.error = None;
+            task.failure_log = None;
             task.cancelable = false;
         })?;
         self.clear_cancellation(task_id)
     }
 
-    pub fn fail_task(&self, task_id: &str, error: String) -> Result<(), String> {
+    pub fn fail_task(
+        &self,
+        task_id: &str,
+        error: String,
+        failure_log: Option<TaskFailureLog>,
+    ) -> Result<BackgroundTask, String> {
         self.update_task(task_id, |task| {
             task.status = BackgroundTaskStatus::Failed;
             task.step = String::from("Failed");
             task.error = Some(error);
+            task.failure_log = failure_log;
             task.cancelable = false;
         })?;
-        self.clear_cancellation(task_id)
+        self.clear_cancellation(task_id)?;
+        self.get_task(task_id)
     }
 
     pub fn cancel_task(&self, task_id: &str) -> Result<BackgroundTask, String> {
@@ -320,6 +330,7 @@ impl TranscriptionTaskState {
             task.status = BackgroundTaskStatus::Canceled;
             task.step = String::from("Canceling");
             task.error = None;
+            task.failure_log = None;
             task.cancelable = false;
         })?;
 
@@ -349,6 +360,7 @@ impl TranscriptionTaskState {
             task.status = BackgroundTaskStatus::Canceled;
             task.step = String::from("Canceling");
             task.error = None;
+            task.failure_log = None;
             task.cancelable = false;
             task.updated_at = timestamp.clone();
             canceled_tasks.push(task.clone());
@@ -521,7 +533,7 @@ impl ModelDownloadState {
 #[cfg(test)]
 mod tests {
     use super::TranscriptionTaskState;
-    use crate::models::{BackgroundTaskKind, BackgroundTaskStatus};
+    use crate::models::{BackgroundTaskKind, BackgroundTaskStatus, TaskFailureLog};
 
     #[test]
     fn tracks_background_task_lifecycle() {
@@ -587,6 +599,56 @@ mod tests {
 
         assert_eq!(canceled.status, BackgroundTaskStatus::Canceled);
         assert!(state.is_canceled(&task.id).expect("cancel check should work"));
+    }
+
+    #[test]
+    fn stores_and_clears_task_failure_log() {
+        let state = TranscriptionTaskState::default();
+        let task = state
+            .create_task(
+                BackgroundTaskKind::FinalTranscription,
+                String::from("Transcribe"),
+                Some(String::from("session-1")),
+                None,
+                true,
+            )
+            .expect("task should be created");
+        let failure_log = TaskFailureLog {
+            occurred_at: String::from("2026-05-13T00:00:00Z"),
+            command_label: Some(String::from("ffmpeg")),
+            command: Some(String::from("ffmpeg -i input.wav output.wav")),
+            exit_code: Some(1),
+            stderr_excerpt: Some(String::from("invalid data")),
+            log_path: Some(String::from("/tmp/task/latest.json")),
+            stderr_path: Some(String::from("/tmp/task/latest.stderr.log")),
+        };
+
+        let failed = state
+            .fail_task(&task.id, String::from("ffmpeg failed"), Some(failure_log))
+            .expect("task should fail");
+
+        assert_eq!(failed.status, BackgroundTaskStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("ffmpeg failed"));
+        assert_eq!(
+            failed
+                .failure_log
+                .as_ref()
+                .and_then(|log| log.command_label.as_deref()),
+            Some("ffmpeg")
+        );
+
+        state
+            .progress_task(&task.id, "Retrying", 10.0, None, None, None, None)
+            .expect("task should update");
+        let retried = state
+            .list_tasks()
+            .expect("tasks should list")
+            .into_iter()
+            .find(|candidate| candidate.id == task.id)
+            .expect("task should be listed");
+        assert_eq!(retried.status, BackgroundTaskStatus::Running);
+        assert!(retried.failure_log.is_none());
+        assert!(retried.error.is_none());
     }
 
     #[test]

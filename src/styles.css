@@ -508,14 +508,6 @@ a {
   white-space: nowrap;
 }
 
-.session-back-link {
-  justify-self: start;
-  min-height: 32px;
-  padding: 0 10px;
-  border-radius: 8px;
-  font-size: 0.86rem;
-}
-
 .panel-header p,
 .session-card p,
 .helper-text,

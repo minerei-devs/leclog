@@ -75,6 +75,18 @@ The app now exposes runtime checks in the Settings sheet:
 
 If `whisper-cli` or a model is missing, recording and imports still create local session files, but final transcription tasks fail with a recoverable error. Install a model from Settings or place one under `src-tauri/models/`, then use the session detail resource manager to reprocess.
 
+## Runtime packaging strategy
+
+The app should own as much of the runtime as is practical, but not every dependency belongs in the installer by default:
+
+- `ffmpeg`: bundled as a Tauri sidecar for macOS Apple Silicon releases.
+- `whisper-cli`: supported as an app sidecar when a `whisper-cli-<target-triple>` binary is added under `src-tauri/binaries/`; current releases also resolve Homebrew and `PATH`.
+- Whisper models: app-managed downloads into the local app data directory. They are intentionally not bundled by default to keep installer size and model choice under user control.
+
+First-run guidance appears on the New Session screen when a required runtime piece is missing. The same checks are always available under Settings → Overview.
+
+Settings → Overview also includes a startup update-check preference. When enabled, Leclog quietly checks the GitHub Releases updater channel on launch and only shows an in-app badge when a newer version is available.
+
 ## Resources and processing
 
 The session detail view manages per-session resources. The Settings sheet manages app-level resources under the app local data directory:
@@ -83,6 +95,7 @@ The session detail view manages per-session resources. The Settings sheet manage
 - normalized audio and transcript artifacts
 - app-managed Whisper models and partial downloads
 - current background tasks
+- failed task command summaries and stderr excerpts, with revealable logs under app data
 
 Deletion is restricted to managed app resources. Imported source files outside the app data directory are never deleted.
 

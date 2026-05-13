@@ -3,11 +3,13 @@ import {
   CheckCircle2,
   Copy,
   Download,
+  Eraser,
   FolderSearch,
   Gauge,
   HardDrive,
   ListChecks,
   RefreshCw,
+  RotateCcw,
   Settings2,
   SlidersHorizontal,
   Trash2,
@@ -32,7 +34,15 @@ import {
   listBackgroundTasks,
   listResources,
   revealResource,
+  retrySessionProcessing,
 } from "@/lib/tauri";
+import {
+  canRetryTask,
+  isActiveTask,
+  retryTaskLabel,
+  summarizeTaskError,
+  taskFailureMeta,
+} from "@/lib/tasks";
 import type {
   BackgroundTask,
   ManagedTranscriptionModel,
@@ -42,12 +52,14 @@ import type {
   ResourceOverview,
   RuntimeStatus,
 } from "@/types/session";
+import { useAppSettings } from "@/hooks/useAppSettings";
 import { useProcessingSettings } from "@/hooks/useProcessingSettings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { RuntimeSetupPanel } from "@/components/RuntimeSetupPanel";
 
-type SettingsPanelId = "overview" | "transcription" | "models" | "storage" | "tasks" | "gaps";
+export type SettingsPanelId = "overview" | "transcription" | "models" | "storage" | "tasks" | "gaps";
 
 type PendingSettingsDelete =
   | { kind: "resource"; resource: ResourceItem }
@@ -56,6 +68,7 @@ type PendingSettingsDelete =
 
 interface SettingsPageProps {
   isOpen: boolean;
+  initialPanel?: SettingsPanelId;
   onClose: () => void;
 }
 
@@ -124,10 +137,6 @@ interface UpdateProgress {
 
 type UpdateStatus = "idle" | "checking" | "available" | "none" | "installing" | "installed" | "error";
 
-function isActiveTask(task: BackgroundTask) {
-  return task.status === "queued" || task.status === "running";
-}
-
 function taskStatusClass(status: BackgroundTask["status"]) {
   if (status === "running" || status === "queued") {
     return "border-blue-200 bg-blue-50 text-blue-700";
@@ -187,12 +196,12 @@ function ResourceLine({
   resource,
   onCopy,
   onReveal,
-  onDelete,
+  onClear,
 }: {
   resource: ResourceItem;
   onCopy: (path: string) => void;
   onReveal: (path: string) => void;
-  onDelete: (resource: ResourceItem) => void;
+  onClear: (resource: ResourceItem) => void;
 }) {
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-slate-100 py-2 last:border-b-0">
@@ -216,8 +225,8 @@ function ResourceLine({
           </Button>
         ) : null}
         {resource.deletable ? (
-          <Button type="button" variant="destructive" size="icon-sm" title="Delete" onClick={() => onDelete(resource)}>
-            <Trash2 className="size-3.5" />
+          <Button type="button" variant="destructive" size="icon-sm" title="Clear" onClick={() => onClear(resource)}>
+            <Eraser className="size-3.5" />
           </Button>
         ) : null}
       </div>
@@ -225,7 +234,12 @@ function ResourceLine({
   );
 }
 
-export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
+export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProps) {
+  const {
+    settings: appSettings,
+    isLoaded: appSettingsLoaded,
+    updateSettings: updateAppSettings,
+  } = useAppSettings();
   const {
     settings: processingSettings,
     isLoaded: settingsLoaded,
@@ -264,6 +278,15 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
     setAppVersion(nextAppVersion);
     setError(null);
   }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    if (initialPanel) {
+      setActivePanel(initialPanel);
+    }
+  }, [initialPanel, isOpen]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -333,7 +356,7 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
     }
   }
 
-  async function handleDeleteResource(resource: ResourceItem) {
+  async function handleClearResource(resource: ResourceItem) {
     setBusyId(resource.id);
     try {
       if (resource.kind === "sessionDir" && resource.sessionId) {
@@ -352,7 +375,7 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
       }
       setPendingDelete(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Failed to delete resource.");
+      setError(reason instanceof Error ? reason.message : "Failed to clear resource.");
     } finally {
       setBusyId(null);
     }
@@ -393,7 +416,7 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
     }
 
     if (pendingDelete.kind === "resource") {
-      await handleDeleteResource(pendingDelete.resource);
+      await handleClearResource(pendingDelete.resource);
       return;
     }
 
@@ -471,6 +494,27 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to cancel task.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleRetryTask(task: BackgroundTask) {
+    if (!canRetryTask(task)) {
+      return;
+    }
+
+    setBusyId(`retry:${task.id}`);
+    setError(null);
+    try {
+      if (task.kind === "modelDownload" && task.modelId) {
+        await downloadTranscriptionModel(task.modelId);
+      } else if (task.sessionId) {
+        await retrySessionProcessing(task.sessionId);
+      }
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to retry task.");
     } finally {
       setBusyId(null);
     }
@@ -572,6 +616,7 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
                   />
                   <Stat label="Active tasks" value={String(activeTaskCount)} detail={`${tasks.length} tracked`} />
                 </div>
+                <RuntimeSetupPanel showWhenReady />
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -604,6 +649,25 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
                       ) : null}
                     </div>
                   </div>
+                  <label className="mt-3 flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-slate-800">
+                        Check for updates on startup
+                      </span>
+                      <span className="block truncate text-xs text-slate-500">
+                        Runs quietly and only shows a badge when a newer release exists.
+                      </span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      className="size-4 accent-slate-950"
+                      checked={appSettings.autoCheckUpdates}
+                      disabled={!appSettingsLoaded}
+                      onChange={(event) =>
+                        void updateAppSettings({ autoCheckUpdates: event.target.checked })
+                      }
+                    />
+                  </label>
                   {updateStatus === "installing" ? (
                     <div className="mt-3">
                       <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
@@ -874,7 +938,7 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
                         resource={resource}
                         onCopy={(path) => void handleCopy(path)}
                         onReveal={(path) => void handleReveal(path)}
-                        onDelete={(nextResource) => {
+                        onClear={(nextResource) => {
                           setError(null);
                           setPendingDelete({ kind: "resource", resource: nextResource });
                         }}
@@ -896,31 +960,72 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
                   {tasks.length === 0 ? (
                     <p className="p-3 text-sm text-slate-500">No background tasks in this app run.</p>
                   ) : (
-                    tasks.map((task) => (
-                      <div key={task.id} className="grid gap-3 p-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
-                        <div className="min-w-0">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <p className="truncate text-sm font-semibold text-slate-950">{task.title}</p>
-                            <Badge variant="outline" className={taskStatusClass(task.status)}>
-                              {task.status}
-                            </Badge>
+                    tasks.map((task) => {
+                      const errorSummary = summarizeTaskError(task);
+                      const failureMeta = taskFailureMeta(task);
+                      const logPath = task.failureLog?.logPath;
+                      return (
+                        <div key={task.id} className="grid gap-3 p-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+                          <div className="min-w-0">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <p className="truncate text-sm font-semibold text-slate-950">{task.title}</p>
+                              <Badge variant="outline" className={taskStatusClass(task.status)}>
+                                {task.status}
+                              </Badge>
+                            </div>
+                            <p className="mt-1 text-xs text-slate-500">
+                              {task.step} · {Math.round(task.percent)}% · {formatDate(task.updatedAt)}
+                            </p>
+                            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                              <div className="h-full rounded-full bg-slate-950" style={{ width: `${Math.max(0, Math.min(100, task.percent))}%` }} />
+                            </div>
+                            {task.error ? (
+                              <p className="mt-2 rounded-md bg-red-50 px-2 py-1 text-xs text-red-700" title={task.error}>
+                                {errorSummary ? `Failed: ${errorSummary}` : task.error}
+                              </p>
+                            ) : null}
+                            {failureMeta ? (
+                              <p className="mt-1 truncate text-[11px] text-red-500" title={task.failureLog?.command ?? undefined}>
+                                {failureMeta}
+                              </p>
+                            ) : null}
                           </div>
-                          <p className="mt-1 text-xs text-slate-500">
-                            {task.step} · {Math.round(task.percent)}% · {formatDate(task.updatedAt)}
-                          </p>
-                          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
-                            <div className="h-full rounded-full bg-slate-950" style={{ width: `${Math.max(0, Math.min(100, task.percent))}%` }} />
+                          <div className="flex flex-wrap items-center justify-end gap-1.5">
+                            {canRetryTask(task) ? (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={busyId === `retry:${task.id}`}
+                                onClick={() => void handleRetryTask(task)}
+                              >
+                                <RotateCcw className="size-3.5" />
+                                {retryTaskLabel(task)}
+                              </Button>
+                            ) : null}
+                            {logPath ? (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                title="Reveal task log"
+                                disabled={busyId === logPath}
+                                onClick={() => void handleReveal(logPath)}
+                              >
+                                <FolderSearch className="size-3.5" />
+                                Log
+                              </Button>
+                            ) : null}
+                            {task.cancelable && isActiveTask(task) ? (
+                              <Button type="button" variant="outline" size="sm" onClick={() => void handleCancelTask(task.id)}>
+                                <XCircle className="size-3.5" />
+                                Cancel
+                              </Button>
+                            ) : null}
                           </div>
-                          {task.error ? <p className="mt-2 text-xs text-red-700">{task.error}</p> : null}
                         </div>
-                        {task.cancelable && isActiveTask(task) ? (
-                          <Button type="button" variant="outline" size="sm" onClick={() => void handleCancelTask(task.id)}>
-                            <XCircle className="size-3.5" />
-                            Cancel
-                          </Button>
-                        ) : null}
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </div>
@@ -951,15 +1056,15 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
         title={
           pendingDelete?.kind === "resource"
             ? pendingDelete.resource.kind === "sessionDir"
-              ? "Delete session?"
-              : `Delete ${pendingDelete.resource.label}?`
+              ? "Clear session resources?"
+              : `Clear ${pendingDelete.resource.label}?`
             : "Delete model?"
         }
         description={
           pendingDelete?.kind === "resource"
             ? pendingDelete.resource.kind === "sessionDir"
-              ? "This removes the session record and all Leclog-managed files for it."
-              : "This removes the selected Leclog-managed app resource."
+              ? "This clears the session record and all Leclog-managed files for it."
+              : "This clears the selected Leclog-managed app resource. Source files outside app data are not touched."
             : "This removes the local Whisper model file managed by Leclog."
         }
         details={
@@ -972,8 +1077,8 @@ export function SettingsPage({ isOpen, onClose }: SettingsPageProps) {
         confirmLabel={
           pendingDelete?.kind === "resource"
             ? pendingDelete.resource.kind === "sessionDir"
-              ? "Delete session"
-              : "Delete resource"
+              ? "Clear all"
+              : "Clear resource"
             : "Delete model"
         }
         isBusy={isBusy}

@@ -1,5 +1,10 @@
 import { load } from "@tauri-apps/plugin-store";
-import type { CaptureSource, RecentState, TranscriptionSettings } from "../types/session";
+import type {
+  AppSettings,
+  CaptureSource,
+  RecentState,
+  TranscriptionSettings,
+} from "../types/session";
 
 function buildDefaultDraftTitle(date = new Date()) {
   const year = date.getFullYear();
@@ -28,6 +33,10 @@ const defaultTranscriptionSettings: TranscriptionSettings = {
   preferredLanguage: "ja",
   promptTerms:
     "これは大学の講義の書き起こしです。自然な日本語の句読点（、。）を補って出力してください。授業、講義、先生、学生、発表。",
+};
+
+const defaultAppSettings: AppSettings = {
+  autoCheckUpdates: true,
 };
 
 export async function getRecentState(): Promise<RecentState> {
@@ -117,5 +126,30 @@ export async function patchTranscriptionSettings(
   };
 }
 
-export { defaultRecentState, defaultTranscriptionSettings };
+export async function getAppSettings(): Promise<AppSettings> {
+  const store = await storePromise;
+
+  return {
+    autoCheckUpdates:
+      (await store.get<boolean>("autoCheckUpdates")) ??
+      defaultAppSettings.autoCheckUpdates,
+  };
+}
+
+export async function patchAppSettings(
+  patch: Partial<AppSettings>,
+): Promise<AppSettings> {
+  const store = await storePromise;
+  const current = await getAppSettings();
+  const next = {
+    ...current,
+    ...patch,
+  };
+
+  await store.set("autoCheckUpdates", next.autoCheckUpdates);
+  await store.save();
+  return next;
+}
+
+export { defaultAppSettings, defaultRecentState, defaultTranscriptionSettings };
 export { buildDefaultDraftTitle };

@@ -50,6 +50,10 @@ export interface RecentState {
   lastViewedSessionId: string | null;
 }
 
+export interface AppSettings {
+  autoCheckUpdates: boolean;
+}
+
 export interface TranscriptionModelInfo {
   id: string;
   label: string;
@@ -107,6 +111,16 @@ export type BackgroundTaskKind =
   | "importMedia"
   | "cleanup";
 
+export interface TaskFailureLog {
+  occurredAt: string;
+  commandLabel: string | null;
+  command: string | null;
+  exitCode: number | null;
+  stderrExcerpt: string | null;
+  logPath: string | null;
+  stderrPath: string | null;
+}
+
 export interface BackgroundTask {
   id: string;
   kind: BackgroundTaskKind;
@@ -119,6 +133,7 @@ export interface BackgroundTask {
   downloadedBytes: number;
   totalBytes: number | null;
   error: string | null;
+  failureLog: TaskFailureLog | null;
   sessionId: string | null;
   modelId: string | null;
   createdAt: string;

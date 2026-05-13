@@ -15,6 +15,8 @@ import { SessionStatsStrip } from "./SessionStatsStrip";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptPanel } from "./TranscriptPanel";
 
+type SessionDetailTab = "transcript" | "resources";
+
 export function SessionDetailPage() {
   const navigate = useNavigate();
   const { sessionId } = useParams();
@@ -24,8 +26,13 @@ export function SessionDetailPage() {
   const [isPolishing, setIsPolishing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<SessionDetailTab>("transcript");
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setActiveTab("transcript");
+  }, [sessionId]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -173,7 +180,7 @@ export function SessionDetailPage() {
   ];
 
   return (
-    <div className="page-grid recording-layout">
+    <div className="grid gap-3">
       <section className="session-side-panel">
         <div className="session-topline">
           <div className="session-title-stack">
@@ -205,6 +212,45 @@ export function SessionDetailPage() {
 
         <SessionStatsStrip items={detailStats} />
 
+        {session.transcriptError ? <p className="error-banner">{session.transcriptError}</p> : null}
+      </section>
+
+      <div className="rounded-lg border border-slate-200 bg-white p-1 shadow-sm">
+        <div className="grid grid-cols-2 gap-1">
+          {[
+            { id: "transcript" as const, label: "Transcript", detail: "Session content" },
+            { id: "resources" as const, label: "Resources", detail: "Files and artifacts" },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              className={[
+                "rounded-md px-3 py-2 text-left transition-colors",
+                activeTab === tab.id
+                  ? "bg-slate-950 text-white shadow-sm"
+                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-950",
+              ].join(" ")}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              <span className="block text-sm font-semibold">{tab.label}</span>
+              <span className={activeTab === tab.id ? "block text-[11px] text-slate-300" : "block text-[11px] text-slate-500"}>
+                {tab.detail}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {activeTab === "transcript" ? (
+        <TranscriptPanel
+          segments={session.segments}
+          polishedTranscriptText={session.polishedTranscriptText}
+          emptyMessage="No transcript segments were saved for this session."
+          canPolish={session.segments.length > 0 && session.transcriptPhase === "ready"}
+          isPolishing={isPolishing}
+          onPolish={() => void handlePolishTranscript()}
+        />
+      ) : (
         <SessionArtifacts
           session={session}
           onSessionUpdate={setSession}
@@ -216,22 +262,7 @@ export function SessionDetailPage() {
             navigate("/new", { replace: true });
           }}
         />
-
-        {session.transcriptError ? <p className="error-banner">{session.transcriptError}</p> : null}
-
-        <Link className="ghost-button session-back-link" to="/">
-          Back to sessions
-        </Link>
-      </section>
-
-      <TranscriptPanel
-        segments={session.segments}
-        polishedTranscriptText={session.polishedTranscriptText}
-        emptyMessage="No transcript segments were saved for this session."
-        canPolish={session.segments.length > 0 && session.transcriptPhase === "ready"}
-        isPolishing={isPolishing}
-        onPolish={() => void handlePolishTranscript()}
-      />
+      )}
 
       <ConfirmDialog
         open={isDeleteDialogOpen}

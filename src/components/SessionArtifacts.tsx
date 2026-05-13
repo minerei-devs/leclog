@@ -1,4 +1,4 @@
-import { Copy, FolderSearch, RotateCcw, Trash2 } from "lucide-react";
+import { Copy, Eraser, FolderSearch, RotateCcw, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { deleteResource, deleteSession, getSession, revealResource, retrySessionProcessing } from "@/lib/tauri";
 import type { LectureSession } from "@/types/session";
@@ -166,7 +166,7 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
     }
   }
 
-  async function handleDelete(row: ArtifactRow) {
+  async function handleClear(row: ArtifactRow) {
     const isSessionFolder = row.kind === "folder";
     if (isSessionFolder) {
       setError(null);
@@ -190,14 +190,14 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
 
     const row = pendingDelete.row;
     try {
-      setBusyAction(`delete:${row.value}`);
+      setBusyAction(`clear:${row.value}`);
       setError(null);
       await deleteResource(row.value, session.id, null);
       const updated = await getSession(session.id);
       onSessionUpdate?.(updated);
       setPendingDelete(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Failed to delete this resource.");
+      setError(reason instanceof Error ? reason.message : "Failed to clear this resource.");
     } finally {
       setBusyAction(null);
     }
@@ -234,15 +234,15 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
             type="button"
             variant="destructive"
             size="sm"
-            title="Delete this session and all Leclog-managed files for it."
-            disabled={busyAction === "delete-session" || busyAction?.startsWith("delete:")}
+            title="Clear this session and all Leclog-managed files for it."
+            disabled={busyAction === "delete-session" || busyAction?.startsWith("clear:")}
             onClick={() => {
               setError(null);
               setPendingDelete({ kind: "session" });
             }}
           >
-            <Trash2 className="size-3.5" />
-            Delete
+            <Eraser className="size-3.5" />
+            Clear all
           </Button>
         </div>
       </div>
@@ -287,11 +287,11 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
                   type="button"
                   variant="destructive"
                   size="icon-sm"
-                  title={row.kind === "folder" ? "Delete session" : "Delete resource"}
-                  disabled={busyAction === `delete:${row.value}`}
-                  onClick={() => void handleDelete(row)}
+                  title={row.kind === "folder" ? "Clear all session resources" : "Clear resource"}
+                  disabled={busyAction === `clear:${row.value}`}
+                  onClick={() => void handleClear(row)}
                 >
-                  <Trash2 className="size-3.5" />
+                  {row.kind === "folder" ? <Trash2 className="size-3.5" /> : <Eraser className="size-3.5" />}
                 </Button>
               ) : null}
             </div>
@@ -303,25 +303,25 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
 
       <ConfirmDialog
         open={pendingDelete !== null}
-        title={pendingDelete?.kind === "resource" ? `Delete ${pendingDelete.row.label}?` : "Delete session?"}
+        title={pendingDelete?.kind === "resource" ? `Clear ${pendingDelete.row.label}?` : "Clear session resources?"}
         description={
           pendingDelete?.kind === "resource"
-            ? "This removes only this Leclog-managed resource from the session."
+            ? "This clears only this Leclog-managed resource from the session. Source files outside app data are not touched."
             : canDeleteSession
-              ? "This removes the session record and all Leclog-managed files for it. Any active processing task for this session will be canceled first."
-              : "This session is actively recording. Pause or stop recording before deleting it."
+              ? "This clears the session record and all Leclog-managed files for it. Any active processing task for this session will be canceled first."
+              : "This session is actively recording. Pause or stop recording before clearing it."
         }
         details={
           pendingDelete?.kind === "resource"
             ? [pendingDelete.row.value]
             : [session.title, session.sessionDir ?? "Managed session folder"]
         }
-        confirmLabel={pendingDelete?.kind === "resource" ? "Delete resource" : "Delete session"}
-        isBusy={busyAction?.startsWith("delete") ?? false}
+        confirmLabel={pendingDelete?.kind === "resource" ? "Clear resource" : "Clear all"}
+        isBusy={busyAction?.startsWith("delete") || busyAction?.startsWith("clear") || false}
         confirmDisabled={pendingDelete?.kind === "session" && !canDeleteSession}
         error={error}
         onCancel={() => {
-          if (!busyAction?.startsWith("delete")) {
+          if (!busyAction?.startsWith("delete") && !busyAction?.startsWith("clear")) {
             setPendingDelete(null);
             setError(null);
           }

@@ -106,6 +106,23 @@ pub struct LectureSession {
     pub capture_target_label: Option<String>,
 }
 
+impl LectureSession {
+    pub fn mark_processing_interrupted(&mut self, transcript_error: impl Into<String>) -> bool {
+        if self.status != SessionStatus::Processing
+            && self.transcript_phase != TranscriptPhase::Processing
+        {
+            return false;
+        }
+
+        if self.status == SessionStatus::Processing {
+            self.status = SessionStatus::Done;
+        }
+        self.transcript_phase = TranscriptPhase::Error;
+        self.transcript_error = Some(transcript_error.into());
+        true
+    }
+}
+
 fn default_capture_source() -> CaptureSource {
     CaptureSource::Microphone
 }
@@ -225,6 +242,18 @@ pub enum BackgroundTaskKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskFailureLog {
+    pub occurred_at: String,
+    pub command_label: Option<String>,
+    pub command: Option<String>,
+    pub exit_code: Option<i32>,
+    pub stderr_excerpt: Option<String>,
+    pub log_path: Option<String>,
+    pub stderr_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackgroundTask {
     pub id: String,
     pub kind: BackgroundTaskKind,
@@ -237,6 +266,8 @@ pub struct BackgroundTask {
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub failure_log: Option<TaskFailureLog>,
     pub session_id: Option<String>,
     pub model_id: Option<String>,
     pub created_at: String,
@@ -299,4 +330,61 @@ pub struct RuntimeStatus {
     pub processing_session_count: usize,
     pub partial_download_count: usize,
     pub issues: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CaptureSource, LectureSession, SessionStatus, TranscriptPhase};
+
+    fn session(status: SessionStatus, transcript_phase: TranscriptPhase) -> LectureSession {
+        LectureSession {
+            id: String::from("session-1"),
+            title: String::from("Session"),
+            created_at: String::from("2026-05-13T00:00:00Z"),
+            updated_at: String::from("2026-05-13T00:00:00Z"),
+            capture_source: CaptureSource::Microphone,
+            status,
+            duration_ms: 0,
+            segments: Vec::new(),
+            session_dir: None,
+            audio_file_paths: Vec::new(),
+            active_audio_file_path: None,
+            audio_mime_type: None,
+            normalized_audio_path: None,
+            processed_transcript_path: None,
+            polished_transcript_path: None,
+            polished_transcript_text: None,
+            live_preview_audio_path: None,
+            live_preview_sample_rate: None,
+            transcript_phase,
+            transcript_error: None,
+            audio_level: None,
+            last_resumed_at: None,
+            capture_target_label: None,
+        }
+    }
+
+    #[test]
+    fn interrupted_processing_session_becomes_terminal_error() {
+        let mut session = session(SessionStatus::Processing, TranscriptPhase::Processing);
+
+        let changed = session.mark_processing_interrupted("canceled");
+
+        assert!(changed);
+        assert_eq!(session.status, SessionStatus::Done);
+        assert_eq!(session.transcript_phase, TranscriptPhase::Error);
+        assert_eq!(session.transcript_error.as_deref(), Some("canceled"));
+    }
+
+    #[test]
+    fn non_processing_session_is_not_changed_by_interruption_marker() {
+        let mut session = session(SessionStatus::Done, TranscriptPhase::Ready);
+
+        let changed = session.mark_processing_interrupted("canceled");
+
+        assert!(!changed);
+        assert_eq!(session.status, SessionStatus::Done);
+        assert_eq!(session.transcript_phase, TranscriptPhase::Ready);
+        assert!(session.transcript_error.is_none());
+    }
 }

@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { RuntimeSetupPanel } from "@/components/RuntimeSetupPanel";
 
 function SourceOption({
   value,
@@ -33,10 +34,10 @@ function SourceOption({
   return (
     <label
       className={[
-        "flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 transition-colors",
+        "flex min-w-0 cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2.5 transition-colors",
         checked
           ? "border-slate-900 bg-slate-950 text-slate-50 shadow-sm"
-          : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50",
+          : "border-slate-300 bg-slate-50 text-slate-800 hover:border-slate-500 hover:bg-white",
       ].join(" ")}
       aria-label={`${title}: ${description}`}
       title={description}
@@ -44,7 +45,11 @@ function SourceOption({
       <RadioGroupItem
         value={value}
         checked={checked}
-        className={checked ? "border-white bg-white text-slate-950" : ""}
+        className={
+          checked
+            ? "border-white bg-white text-slate-950"
+            : "border-slate-600 bg-slate-200 text-slate-900"
+        }
         onClick={() => onSelect(value)}
       />
       <div className="min-w-0">
@@ -242,12 +247,14 @@ export function SessionListPage() {
         </div>
       </div>
 
-      <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.62fr)]">
+      <RuntimeSetupPanel />
+
+      <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.58fr)]">
         <form
-          className="grid gap-2 rounded-lg border border-slate-200 bg-white p-3 shadow-sm"
+          className="grid gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
           onSubmit={handleStartSession}
         >
-          <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+          <div className="grid gap-2">
             <div className="min-w-0 space-y-1.5">
               <Label htmlFor="session-title" className="text-xs font-medium text-slate-600">
                 Session title
@@ -261,11 +268,11 @@ export function SessionListPage() {
                   void updateRecentState({ draftTitle: nextTitle });
                 }}
                 placeholder="2026-04-22 14:30"
-                className="h-8 rounded-lg border-slate-200 bg-white text-sm"
+                className="h-10 rounded-lg border-slate-300 bg-white text-base"
               />
             </div>
 
-            <div className="flex flex-wrap gap-2 md:justify-end">
+            <div className="flex flex-wrap gap-2">
               <Button type="submit" size="sm" className="px-3">
                 <Play className="size-4" />
                 {isStarting ? "Starting..." : "Start recording"}
@@ -286,8 +293,8 @@ export function SessionListPage() {
             </div>
           </div>
 
-          <div className="grid gap-1.5 md:grid-cols-[64px_minmax(0,1fr)] md:items-center">
-            <Label className="text-xs font-medium text-slate-600 md:pt-0">Source</Label>
+          <div className="grid gap-1.5">
+            <Label className="text-xs font-medium text-slate-600">Source</Label>
             <RadioGroup
               value={draftCaptureSource}
               onValueChange={(value) => {
