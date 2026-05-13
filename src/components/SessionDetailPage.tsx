@@ -197,7 +197,7 @@ export function SessionDetailPage() {
 
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
-      <section className="sticky top-0 z-30 -mx-5 -mt-5 shrink-0 border-b border-slate-200/80 bg-slate-50/90 px-5 pt-4 backdrop-blur-xl">
+      <section className="shrink-0 border-b border-slate-200/80">
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="eyebrow">Session detail</p>
@@ -231,13 +231,13 @@ export function SessionDetailPage() {
           </div>
         </div>
 
-        <nav className="mt-3 flex min-w-0 items-end gap-1" aria-label="Session transcript views">
+        <nav className="mt-2 flex min-w-0 items-end gap-1" aria-label="Session transcript views">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               type="button"
               className={[
-                "relative h-9 shrink-0 border-b-2 px-3 text-sm font-medium transition-colors",
+                "relative h-8 shrink-0 border-b-2 px-3 text-sm font-medium transition-colors",
                 activeTab === tab.id
                   ? "border-slate-950 text-slate-950"
                   : "border-transparent text-slate-500 hover:text-slate-900",
