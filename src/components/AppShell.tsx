@@ -681,8 +681,8 @@ export function AppShell({ children }: PropsWithChildren) {
           </ScrollArea>
         </aside>
 
-        <main className="h-screen overflow-y-auto">
-          <div className="mx-auto w-full max-w-7xl px-5 py-5">{children}</div>
+        <main className="h-screen min-w-0 overflow-y-auto overflow-x-hidden">
+          <div className="mx-auto h-full w-full max-w-7xl min-w-0 overflow-x-hidden px-5 py-5">{children}</div>
         </main>
       </div>
       {visibleTasks.length > 0 || availableUpdateVersion ? (

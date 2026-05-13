@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { Trash2 } from "lucide-react";
+import { FolderSearch, Trash2, X } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useRecentState } from "../hooks/useRecentState";
 import { useSessionPolling } from "../hooks/useSessionPolling";
 import { getErrorMessage } from "../lib/errors";
-import { formatDate, formatDuration } from "../lib/format";
+import { formatDuration } from "../lib/format";
 import { getCaptureSourceLabel } from "../lib/session";
 import { deleteSession, getSession, polishSessionTranscript } from "../lib/tauri";
 import type { LectureSession } from "../types/session";
@@ -12,11 +12,10 @@ import { Button } from "./ui/button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SessionArtifacts } from "./SessionArtifacts";
 import { SessionAudioReviewBar, type AudioSeekRequest } from "./SessionAudioReviewBar";
-import { SessionStatsStrip } from "./SessionStatsStrip";
 import { StatusBadge } from "./StatusBadge";
-import { TranscriptPanel } from "./TranscriptPanel";
+import { TranscriptPanel, type TranscriptView } from "./TranscriptPanel";
 
-type SessionDetailTab = "transcript" | "resources" | "details";
+type SessionDetailTab = TranscriptView;
 
 export function SessionDetailPage() {
   const navigate = useNavigate();
@@ -27,16 +26,18 @@ export function SessionDetailPage() {
   const [isPolishing, setIsPolishing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<SessionDetailTab>("transcript");
+  const [isResourcesPanelOpen, setIsResourcesPanelOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<SessionDetailTab>("content");
   const [activeTimeMs, setActiveTimeMs] = useState<number | null>(null);
   const [seekRequest, setSeekRequest] = useState<AudioSeekRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
-    setActiveTab("transcript");
+    setActiveTab("content");
     setActiveTimeMs(null);
     setSeekRequest(null);
+    setIsResourcesPanelOpen(false);
   }, [sessionId]);
 
   useEffect(() => {
@@ -158,45 +159,13 @@ export function SessionDetailPage() {
       session.audioFilePaths.length > 0,
   );
   const tabs = [
-    { id: "transcript" as const, label: "Transcript" },
-    { id: "resources" as const, label: "Resources" },
-    { id: "details" as const, label: "Details" },
-  ];
-  const detailStats = [
-    {
-      label: "Duration",
-      value: formatDuration(session.durationMs),
-      title: "Final captured duration.",
-    },
-    {
-      label: "Phase",
-      value: session.transcriptPhase,
-      title: "Transcript pipeline state.",
-    },
-    {
-      label: "Source",
-      value: sourceLabel,
-      title: `Capture source: ${sourceLabel}.`,
-    },
-    {
-      label: "Updated",
-      value: formatDate(session.updatedAt),
-      title: `Created ${formatDate(session.createdAt)}. Updated ${formatDate(session.updatedAt)}.`,
-    },
-    ...(session.captureTargetLabel
-      ? [
-          {
-            label: "Target",
-            value: session.captureTargetLabel,
-            title: session.captureTargetLabel,
-          },
-        ]
-      : []),
+    { id: "content" as const, label: "Content" },
+    { id: "timeline" as const, label: "Timeline" },
   ];
 
   return (
-    <div className="grid gap-3">
-      <section className="sticky top-0 z-30 -mx-5 -mt-5 border-b border-slate-200/80 bg-slate-50/90 px-5 pt-4 backdrop-blur-xl">
+    <div className="flex h-full min-w-0 flex-col overflow-hidden">
+      <section className="sticky top-0 z-30 -mx-5 -mt-5 shrink-0 border-b border-slate-200/80 bg-slate-50/90 px-5 pt-4 backdrop-blur-xl">
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="eyebrow">Session detail</p>
@@ -209,6 +178,17 @@ export function SessionDetailPage() {
           </div>
           <div className="flex shrink-0 items-center gap-1.5 pt-0.5">
             <StatusBadge status={session.status} />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-label="Open session resources"
+              title="Manage files and artifacts for this session."
+              onClick={() => setIsResourcesPanelOpen(true)}
+            >
+              <FolderSearch className="size-3.5" />
+              <span className="hidden sm:inline">Resources</span>
+            </Button>
             <Button
               type="button"
               variant="destructive"
@@ -230,7 +210,7 @@ export function SessionDetailPage() {
           </div>
         </div>
 
-        <nav className="mt-3 flex min-w-0 items-end gap-1 overflow-x-auto" aria-label="Session detail sections">
+        <nav className="mt-3 flex min-w-0 items-end gap-1" aria-label="Session transcript views">
           {tabs.map((tab) => (
             <button
               key={tab.id}
@@ -249,51 +229,38 @@ export function SessionDetailPage() {
         </nav>
       </section>
 
-      {activeTab === "transcript" ? (
-        <div className="grid gap-2">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden pt-3">
+        {session.transcriptError ? <p className="error-banner shrink-0">{session.transcriptError}</p> : null}
+        <div className="shrink-0">
           <SessionAudioReviewBar
             session={session}
             currentTimeMs={activeTimeMs}
             seekRequest={seekRequest}
             onTimeChange={setActiveTimeMs}
           />
-          <TranscriptPanel
-            segments={session.segments}
-            polishedTranscriptText={session.polishedTranscriptText}
-            emptyMessage="No transcript segments were saved for this session."
-            canPolish={session.segments.length > 0 && session.transcriptPhase === "ready"}
-            isPolishing={isPolishing}
-            activeTimeMs={activeTimeMs}
-            syncActiveTime={hasReviewAudio}
-            onPolish={() => void handlePolishTranscript()}
-            onSeek={
-              hasReviewAudio
-                ? (timeMs) => {
-                    setSeekRequest({ timeMs, requestedAt: Date.now() });
-                    setActiveTimeMs(timeMs);
-                  }
-                : undefined
-            }
-          />
         </div>
-      ) : activeTab === "resources" ? (
-        <SessionArtifacts
-          session={session}
-          onSessionUpdate={setSession}
-          onSessionDelete={() => {
-            void updateRecentState({
-              activeSessionId: null,
-              lastViewedSessionId: null,
-            });
-            navigate("/new", { replace: true });
-          }}
+        <TranscriptPanel
+          segments={session.segments}
+          polishedTranscriptText={session.polishedTranscriptText}
+          emptyMessage="No transcript segments were saved for this session."
+          canPolish={session.segments.length > 0 && session.transcriptPhase === "ready"}
+          isPolishing={isPolishing}
+          activeTimeMs={activeTimeMs}
+          syncActiveTime={hasReviewAudio}
+          activeView={activeTab}
+          hideViewTabs
+          fillAvailable
+          onPolish={() => void handlePolishTranscript()}
+          onSeek={
+            hasReviewAudio
+              ? (timeMs) => {
+                  setSeekRequest({ timeMs, requestedAt: Date.now() });
+                  setActiveTimeMs(timeMs);
+                }
+              : undefined
+          }
         />
-      ) : (
-        <section className="session-side-panel">
-          <SessionStatsStrip items={detailStats} />
-          {session.transcriptError ? <p className="error-banner">{session.transcriptError}</p> : null}
-        </section>
-      )}
+      </div>
 
       <ConfirmDialog
         open={isDeleteDialogOpen}
@@ -319,6 +286,53 @@ export function SessionDetailPage() {
         }}
         onConfirm={() => void handleDeleteSession()}
       />
+
+      {isResourcesPanelOpen ? (
+        <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/25 backdrop-blur-[2px]" role="dialog" aria-modal="true">
+          <button
+            className="absolute inset-0 cursor-default"
+            type="button"
+            aria-label="Close resources"
+            onClick={() => setIsResourcesPanelOpen(false)}
+          />
+          <aside className="relative flex h-full w-full max-w-3xl flex-col border-l border-slate-200 bg-white shadow-2xl">
+            <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 px-4">
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                  Session resources
+                </p>
+                <h2 className="truncate text-base font-semibold text-slate-950">
+                  {session.title}
+                </h2>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Close resources"
+                onClick={() => setIsResourcesPanelOpen(false)}
+              >
+                <X className="size-4" />
+              </Button>
+            </header>
+            <div className="min-h-0 flex-1 p-3">
+              <SessionArtifacts
+                session={session}
+                fillAvailable
+                onSessionUpdate={setSession}
+                onSessionDelete={() => {
+                  setIsResourcesPanelOpen(false);
+                  void updateRecentState({
+                    activeSessionId: null,
+                    lastViewedSessionId: null,
+                  });
+                  navigate("/new", { replace: true });
+                }}
+              />
+            </div>
+          </aside>
+        </div>
+      ) : null}
     </div>
   );
 }

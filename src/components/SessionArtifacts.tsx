@@ -8,6 +8,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 interface SessionArtifactsProps {
   session: LectureSession;
+  fillAvailable?: boolean;
   onSessionUpdate?: (session: LectureSession) => void;
   onSessionDelete?: () => void;
 }
@@ -30,7 +31,12 @@ function fileName(path: string) {
   return parts.length > 0 ? parts[parts.length - 1] : path;
 }
 
-export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: SessionArtifactsProps) {
+export function SessionArtifacts({
+  session,
+  fillAvailable = false,
+  onSessionUpdate,
+  onSessionDelete,
+}: SessionArtifactsProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
@@ -208,7 +214,10 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
 
   return (
     <section
-      className="session-resources-panel"
+      className={[
+        "session-resources-panel",
+        fillAvailable ? "flex h-full min-h-0 flex-col overflow-hidden" : "",
+      ].join(" ")}
       title="Session-level capture files and transcript artifacts. App-wide models, cache, and cleanup live in Settings."
     >
       <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-2.5 py-1.5">
@@ -247,7 +256,7 @@ export function SessionArtifacts({ session, onSessionUpdate, onSessionDelete }: 
         </div>
       </div>
 
-      <div className="max-h-[42vh] overflow-y-auto px-2.5">
+      <div className={fillAvailable ? "min-h-0 flex-1 overflow-y-auto px-2.5" : "max-h-[42vh] overflow-y-auto px-2.5"}>
         {rows.map((row) => (
           <div
             key={`${row.label}-${row.value}`}
