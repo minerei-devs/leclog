@@ -16,7 +16,7 @@ import {
 import { cn } from "../lib/utils";
 import type { TranscriptSegment } from "../types/session";
 
-export type TranscriptView = "content" | "timeline";
+export type TranscriptPanelView = "polished" | "raw" | "timeline";
 
 interface TranscriptPanelProps {
   segments: TranscriptSegment[];
@@ -26,12 +26,13 @@ interface TranscriptPanelProps {
   isPolishing?: boolean;
   activeTimeMs?: number | null;
   syncActiveTime?: boolean;
-  activeView?: TranscriptView;
+  activeView?: TranscriptPanelView;
   hideViewTabs?: boolean;
+  showTimelineTab?: boolean;
   fillAvailable?: boolean;
   onPolish?: () => void;
   onSeek?: (timeMs: number) => void;
-  onActiveViewChange?: (view: TranscriptView) => void;
+  onActiveViewChange?: (view: TranscriptPanelView) => void;
 }
 
 interface SearchMatch {
@@ -143,13 +144,16 @@ export function TranscriptPanel({
   syncActiveTime = false,
   activeView,
   hideViewTabs = false,
+  showTimelineTab = false,
   fillAvailable = false,
   onPolish,
   onSeek,
   onActiveViewChange,
 }: TranscriptPanelProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
-  const [internalActiveView, setInternalActiveView] = useState<TranscriptView>("content");
+  const [internalActiveView, setInternalActiveView] = useState<TranscriptPanelView>(
+    polishedTranscriptText?.trim() ? "polished" : "raw",
+  );
   const [searchQuery, setSearchQuery] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const scrollParentRef = useRef<HTMLDivElement | null>(null);
@@ -160,8 +164,9 @@ export function TranscriptPanel({
   );
   const copyTarget = polishedTranscriptText?.trim() || rawTranscript;
   const hasPolishedTranscript = Boolean(polishedTranscriptText?.trim());
-  const resolvedView = activeView ?? internalActiveView;
-  const showsPolishedContent = resolvedView === "content" && hasPolishedTranscript;
+  const resolvedView =
+    activeView ?? (internalActiveView === "polished" && !hasPolishedTranscript ? "raw" : internalActiveView);
+  const showsPolishedContent = resolvedView === "polished" && hasPolishedTranscript;
   const searchMatches = useMemo(
     () => buildSearchMatches(sentenceChunks, searchQuery),
     [searchQuery, sentenceChunks],
@@ -181,7 +186,7 @@ export function TranscriptPanel({
     );
     return chunkIndex === -1 ? null : chunkIndex;
   }, [activeTimeMs, sentenceChunks]);
-  const canSearchRows = sentenceChunks.length > 0 && !showsPolishedContent;
+  const canSearchRows = sentenceChunks.length > 0 && resolvedView !== "polished";
   const rowVirtualizer = useVirtualizer({
     count: sentenceChunks.length,
     getScrollElement: () => scrollParentRef.current,
@@ -247,14 +252,14 @@ export function TranscriptPanel({
     });
   }
 
-  function handleSetView(view: TranscriptView) {
+  function handleSetView(view: TranscriptPanelView) {
     if (activeView === undefined) {
       setInternalActiveView(view);
     }
     onActiveViewChange?.(view);
   }
 
-  function renderVirtualTranscriptRows(mode: TranscriptView) {
+  function renderVirtualTranscriptRows(mode: "raw" | "timeline") {
     return (
       <div
         ref={scrollParentRef}
@@ -272,6 +277,7 @@ export function TranscriptPanel({
             const isSearchHit = matchingChunkIndexes.has(virtualRow.index);
             const isActiveSearchHit = activeSearchChunkIndex === virtualRow.index;
             const isActiveTimeHit = activeTimeChunkIndex === virtualRow.index;
+            const isAnimatedTimelineHit = mode === "timeline" && isActiveTimeHit;
 
             return (
               <article
@@ -279,11 +285,11 @@ export function TranscriptPanel({
                 data-index={virtualRow.index}
                 ref={rowVirtualizer.measureElement}
                 className={[
-                  "absolute left-0 top-0 w-full border-b border-slate-100 px-3 py-2.5 last:border-b-0",
+                  "absolute left-0 top-0 w-full border-b border-slate-100 px-3 py-2.5 transition-[background-color,box-shadow] duration-300 last:border-b-0",
                   isActiveSearchHit
                     ? "bg-amber-50"
                     : isActiveTimeHit
-                      ? "bg-blue-50"
+                      ? "bg-blue-50 shadow-[inset_3px_0_0_#2563eb]"
                       : isSearchHit
                         ? "bg-amber-50/45"
                         : chunk.isResolved
@@ -314,7 +320,13 @@ export function TranscriptPanel({
                     <span className="truncate">{chunk.isResolved ? "ready" : "draft / unresolved"}</span>
                   </div>
                 ) : null}
-                <p className={cn("text-sm leading-6 text-slate-800", mode === "timeline" && "mt-1")}>
+                <p
+                  className={cn(
+                    "text-sm leading-6 text-slate-800",
+                    mode === "timeline" && "mt-1",
+                    isAnimatedTimelineHit && "timeline-active-text",
+                  )}
+                >
                   <HighlightedText
                     text={chunk.text}
                     query={searchQuery}
@@ -384,18 +396,33 @@ export function TranscriptPanel({
           <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2">
             {hideViewTabs ? null : (
               <div className="flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
-                <button
-                  type="button"
-                  className={[
-                    "h-7 rounded-md px-2.5 text-xs font-medium transition-colors",
-                    resolvedView === "content"
-                      ? "bg-white text-slate-950 shadow-sm"
-                      : "text-slate-600 hover:text-slate-950",
-                  ].join(" ")}
-                  onClick={() => handleSetView("content")}
-                >
-                  Content
-                </button>
+                {hasPolishedTranscript ? (
+                  <button
+                    type="button"
+                    className={[
+                      "h-7 rounded-md px-2.5 text-xs font-medium transition-colors",
+                      resolvedView === "polished"
+                        ? "bg-white text-slate-950 shadow-sm"
+                        : "text-slate-600 hover:text-slate-950",
+                    ].join(" ")}
+                    onClick={() => handleSetView("polished")}
+                  >
+                    Polished
+                  </button>
+                ) : null}
+              <button
+                type="button"
+                className={[
+                  "h-7 rounded-md px-2.5 text-xs font-medium transition-colors",
+                  resolvedView === "raw"
+                    ? "bg-white text-slate-950 shadow-sm"
+                    : "text-slate-600 hover:text-slate-950",
+                ].join(" ")}
+                onClick={() => handleSetView("raw")}
+              >
+                Raw
+              </button>
+              {showTimelineTab ? (
                 <button
                   type="button"
                   className={[
@@ -408,7 +435,8 @@ export function TranscriptPanel({
                 >
                   Timeline
                 </button>
-              </div>
+              ) : null}
+            </div>
             )}
 
             <div
@@ -462,9 +490,7 @@ export function TranscriptPanel({
             </pre>
           ) : null}
 
-          {resolvedView === "content" && !showsPolishedContent
-            ? renderVirtualTranscriptRows("content")
-            : null}
+          {resolvedView === "raw" ? renderVirtualTranscriptRows("raw") : null}
 
           {resolvedView === "timeline" ? renderVirtualTranscriptRows("timeline") : null}
         </div>

@@ -391,6 +391,28 @@ a {
   font-size: 0.86rem;
 }
 
+.timeline-active-text {
+  color: #1e3a8a;
+  animation: timeline-text-highlight 900ms ease-out;
+}
+
+@keyframes timeline-text-highlight {
+  0% {
+    background: rgba(37, 99, 235, 0.18);
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .timeline-active-text {
+    animation: none;
+  }
+}
+
 .panel-header,
 .session-card-header {
   display: flex;
