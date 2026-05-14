@@ -10,7 +10,9 @@ import {
 } from "lucide-react";
 import { formatDuration } from "../lib/format";
 import {
+  buildTranscriptSearchMatches,
   buildTranscriptSentenceChunks,
+  getActiveTranscriptChunkIndex,
   joinTranscriptSentenceChunks,
 } from "../lib/session";
 import { cn } from "../lib/utils";
@@ -34,34 +36,6 @@ interface TranscriptPanelProps {
   onSeek?: (timeMs: number) => void;
   onTimelineUserScroll?: () => void;
   onActiveViewChange?: (view: TranscriptPanelView) => void;
-}
-
-interface SearchMatch {
-  chunkIndex: number;
-  startIndex: number;
-}
-
-function buildSearchMatches(
-  chunks: ReturnType<typeof buildTranscriptSentenceChunks>,
-  query: string,
-) {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) {
-    return [];
-  }
-
-  const matches: SearchMatch[] = [];
-  chunks.forEach((chunk, chunkIndex) => {
-    const normalizedText = chunk.text.toLocaleLowerCase();
-    let fromIndex = 0;
-    let startIndex = normalizedText.indexOf(normalizedQuery, fromIndex);
-    while (startIndex !== -1) {
-      matches.push({ chunkIndex, startIndex });
-      fromIndex = startIndex + normalizedQuery.length;
-      startIndex = normalizedText.indexOf(normalizedQuery, fromIndex);
-    }
-  });
-  return matches;
 }
 
 function HighlightedText({
@@ -172,7 +146,7 @@ export function TranscriptPanel({
     activeView ?? (internalActiveView === "polished" && !hasPolishedTranscript ? "raw" : internalActiveView);
   const showsPolishedContent = resolvedView === "polished" && hasPolishedTranscript;
   const searchMatches = useMemo(
-    () => buildSearchMatches(sentenceChunks, searchQuery),
+    () => buildTranscriptSearchMatches(sentenceChunks, searchQuery),
     [searchQuery, sentenceChunks],
   );
   const matchingChunkIndexes = useMemo(
@@ -182,13 +156,7 @@ export function TranscriptPanel({
   const activeSearchMatch = searchMatches[activeMatchIndex] ?? null;
   const activeSearchChunkIndex = activeSearchMatch?.chunkIndex ?? null;
   const activeTimeChunkIndex = useMemo(() => {
-    if (activeTimeMs === null) {
-      return null;
-    }
-    const chunkIndex = sentenceChunks.findIndex(
-      (chunk) => activeTimeMs >= chunk.startMs && activeTimeMs <= chunk.endMs,
-    );
-    return chunkIndex === -1 ? null : chunkIndex;
+    return getActiveTranscriptChunkIndex(sentenceChunks, activeTimeMs);
   }, [activeTimeMs, sentenceChunks]);
   const canSearchRows = sentenceChunks.length > 0 && resolvedView !== "polished";
   const rowVirtualizer = useVirtualizer({

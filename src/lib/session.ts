@@ -8,6 +8,15 @@ interface TranscriptSentenceChunk {
   isResolved: boolean;
 }
 
+export interface TranscriptSearchMatch {
+  chunkIndex: number;
+  startIndex: number;
+}
+
+const FALLBACK_SEGMENT_DURATION_MS = 4_000;
+const MAX_SEGMENTS_PER_TRANSCRIPT_CHUNK = 6;
+const MAX_TRANSCRIPT_CHUNK_CHARS = 720;
+
 export function getLiveDurationMs(
   session: Pick<LectureSession, "durationMs" | "lastResumedAt" | "status">,
   now = Date.now(),
@@ -80,11 +89,33 @@ function mergeTranscriptText(left: string, right: string) {
   return `${left}${right}`;
 }
 
+function resolveSegmentTiming(
+  segment: TranscriptSegment,
+  fallbackStartMs: number,
+) {
+  const rawStartMs = Number(segment.startMs);
+  const hasValidStart = Number.isFinite(rawStartMs) && rawStartMs >= 0;
+  const startMs =
+    hasValidStart && (rawStartMs > 0 || fallbackStartMs === 0)
+      ? rawStartMs
+      : fallbackStartMs;
+
+  const rawEndMs = Number(segment.endMs);
+  const endMs =
+    Number.isFinite(rawEndMs) && rawEndMs > startMs
+      ? rawEndMs
+      : startMs + FALLBACK_SEGMENT_DURATION_MS;
+
+  return { startMs, endMs };
+}
+
 export function buildTranscriptSentenceChunks(
   segments: TranscriptSegment[],
 ): TranscriptSentenceChunk[] {
   const chunks: TranscriptSentenceChunk[] = [];
   let activeChunk: TranscriptSentenceChunk | null = null;
+  let activeChunkSegmentCount = 0;
+  let fallbackStartMs = 0;
 
   for (const segment of segments) {
     const text = segment.text.trim();
@@ -92,25 +123,36 @@ export function buildTranscriptSentenceChunks(
       continue;
     }
 
+    const timing = resolveSegmentTiming(segment, fallbackStartMs);
+    fallbackStartMs = Math.max(fallbackStartMs, timing.endMs);
+
     if (!activeChunk) {
       activeChunk = {
         id: segment.id,
-        startMs: segment.startMs,
-        endMs: segment.endMs,
+        startMs: timing.startMs,
+        endMs: timing.endMs,
         text,
         isResolved: segment.isFinal && endsWithSentencePunctuation(text),
       };
+      activeChunkSegmentCount = 1;
     } else {
       activeChunk.text = mergeTranscriptText(activeChunk.text, text);
-      activeChunk.endMs = segment.endMs;
+      activeChunk.endMs = Math.max(activeChunk.endMs, timing.endMs);
       activeChunk.isResolved =
         activeChunk.isResolved || (segment.isFinal && endsWithSentencePunctuation(activeChunk.text));
+      activeChunkSegmentCount += 1;
     }
 
-    if (endsWithSentencePunctuation(activeChunk.text)) {
-      activeChunk.isResolved = activeChunk.isResolved && segment.isFinal;
+    const hasSentenceBoundary = endsWithSentencePunctuation(activeChunk.text);
+    const shouldForceBoundary =
+      activeChunkSegmentCount >= MAX_SEGMENTS_PER_TRANSCRIPT_CHUNK ||
+      activeChunk.text.length >= MAX_TRANSCRIPT_CHUNK_CHARS;
+
+    if (hasSentenceBoundary || shouldForceBoundary) {
+      activeChunk.isResolved = hasSentenceBoundary && activeChunk.isResolved && segment.isFinal;
       chunks.push(activeChunk);
       activeChunk = null;
+      activeChunkSegmentCount = 0;
     }
   }
 
@@ -129,4 +171,59 @@ export function joinTranscriptSentenceChunks(
     .map((chunk) => chunk.text.trim())
     .filter((text) => text.length > 0)
     .join("\n");
+}
+
+export function buildTranscriptSearchMatches(
+  chunks: Pick<TranscriptSentenceChunk, "text">[],
+  query: string,
+) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const matches: TranscriptSearchMatch[] = [];
+  chunks.forEach((chunk, chunkIndex) => {
+    const normalizedText = chunk.text.toLocaleLowerCase();
+    let fromIndex = 0;
+    let startIndex = normalizedText.indexOf(normalizedQuery, fromIndex);
+    while (startIndex !== -1) {
+      matches.push({ chunkIndex, startIndex });
+      fromIndex = startIndex + normalizedQuery.length;
+      startIndex = normalizedText.indexOf(normalizedQuery, fromIndex);
+    }
+  });
+  return matches;
+}
+
+export function getActiveTranscriptChunkIndex(
+  chunks: Pick<TranscriptSentenceChunk, "startMs" | "endMs">[],
+  activeTimeMs: number | null,
+) {
+  if (activeTimeMs === null || chunks.length === 0) {
+    return null;
+  }
+
+  let low = 0;
+  let high = chunks.length - 1;
+  let candidateIndex = -1;
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (chunks[middle].startMs <= activeTimeMs) {
+      candidateIndex = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  if (candidateIndex === -1) {
+    return null;
+  }
+
+  const candidate = chunks[candidateIndex];
+  return activeTimeMs >= candidate.startMs && activeTimeMs <= candidate.endMs
+    ? candidateIndex
+    : null;
 }
