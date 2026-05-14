@@ -500,35 +500,66 @@ fn current_target_triple() -> &'static str {
 }
 
 pub fn resolve_ffmpeg_path(app: &AppHandle) -> PathBuf {
+    let target_triple = current_target_triple();
+    let mut candidates = Vec::new();
+
     if let Ok(path) = env::var("LECLOG_FFMPEG_PATH") {
-        let candidate = PathBuf::from(path);
-        if candidate.exists() {
-            return candidate;
+        candidates.push(PathBuf::from(path));
+    }
+
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join(format!("ffmpeg-{target_triple}")),
+    );
+
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push(exe_dir.join("ffmpeg"));
+            candidates.push(exe_dir.join(format!("ffmpeg-{target_triple}")));
         }
     }
 
-    let target_triple = current_target_triple();
-    let local_sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join(format!("ffmpeg-{target_triple}"));
-    if local_sidecar.exists() {
-        return local_sidecar;
-    }
-
     if let Ok(resource_dir) = app.path().resource_dir() {
-        for candidate in [
+        candidates.extend([
             resource_dir.join(format!("ffmpeg-{target_triple}")),
             resource_dir
                 .join("binaries")
                 .join(format!("ffmpeg-{target_triple}")),
-        ] {
-            if candidate.exists() {
-                return candidate;
-            }
-        }
+        ]);
     }
 
-    PathBuf::from("ffmpeg")
+    candidates.extend([
+        PathBuf::from("/opt/homebrew/bin/ffmpeg"),
+        PathBuf::from("/usr/local/bin/ffmpeg"),
+        PathBuf::from("ffmpeg"),
+    ]);
+
+    let fallback = candidates
+        .iter()
+        .find(|candidate| candidate.components().count() == 1 || candidate.exists())
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("ffmpeg"));
+
+    candidates
+        .into_iter()
+        .find(|candidate| command_candidate_available(candidate, "-version"))
+        .unwrap_or(fallback)
+}
+
+fn command_candidate_available(candidate: &Path, probe_arg: &str) -> bool {
+    if candidate.components().count() > 1 && !candidate.exists() {
+        return false;
+    }
+
+    Command::new(candidate)
+        .arg(probe_arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 pub fn resolve_whisper_cli_path(app: &AppHandle) -> PathBuf {

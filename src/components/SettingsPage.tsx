@@ -22,6 +22,7 @@ import { check } from "@tauri-apps/plugin-updater";
 import type { DownloadEvent, Update } from "@tauri-apps/plugin-updater";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { getErrorMessage } from "@/lib/errors";
 import { formatBytes, formatDate } from "@/lib/format";
 import {
   getLanguageLabel,
@@ -594,7 +595,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
       }
     } catch (reason) {
       setUpdateStatus("error");
-      setUpdateMessage(reason instanceof Error ? reason.message : "Failed to check for updates.");
+      setUpdateMessage(getErrorMessage(reason, "Failed to check for updates."));
     }
   }
 
@@ -614,7 +615,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
       setPendingUpdate(null);
     } catch (reason) {
       setUpdateStatus("error");
-      setUpdateMessage(reason instanceof Error ? reason.message : "Failed to install update.");
+      setUpdateMessage(getErrorMessage(reason, "Failed to install update."));
     }
   }
 

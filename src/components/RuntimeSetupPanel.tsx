@@ -8,6 +8,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { getErrorMessage } from "@/lib/errors";
 import { formatBytes } from "@/lib/format";
 import {
   downloadTranscriptionModel,
@@ -29,7 +30,11 @@ function runtimeSource(path: string | null, binaryName: string) {
   if (!path) {
     return "Not resolved";
   }
-  if (path.includes(`/binaries/${binaryName}`) || path.includes(`${binaryName}-aarch64-apple-darwin`)) {
+  if (
+    path.includes(`/binaries/${binaryName}`) ||
+    path.includes(`/Contents/MacOS/${binaryName}`) ||
+    path.includes(`${binaryName}-aarch64-apple-darwin`)
+  ) {
     return "App sidecar";
   }
   if (path.includes("/opt/homebrew") || path.includes("/usr/local")) {
@@ -79,7 +84,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
     void refresh()
       .catch((reason) => {
         if (isMounted) {
-          setError(reason instanceof Error ? reason.message : "Failed to check runtime setup.");
+          setError(getErrorMessage(reason, "Failed to check runtime setup."));
         }
       })
       .finally(() => {
