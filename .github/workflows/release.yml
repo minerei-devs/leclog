@@ -169,3 +169,53 @@ jobs:
           releaseDraft: ${{ steps.meta.outputs.draft }}
           prerelease: ${{ steps.meta.outputs.prerelease }}
           generateReleaseNotes: true
+
+      - name: Re-sign final updater asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          work_dir="${RUNNER_TEMP}/updater-signature"
+          rm -rf "${work_dir}"
+          mkdir -p "${work_dir}"
+
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "Leclog_aarch64.app.tar.gz" \
+            --dir "${work_dir}"
+
+          pnpm tauri signer sign "${work_dir}/Leclog_aarch64.app.tar.gz"
+
+          RELEASE_TAG="${RELEASE_TAG}" \
+          GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+          SIGNATURE_PATH="${work_dir}/Leclog_aarch64.app.tar.gz.sig" \
+          node <<'NODE'
+          const fs = require("fs");
+
+          const tag = process.env.RELEASE_TAG;
+          const version = tag.replace(/^v/, "");
+          const signature = fs.readFileSync(process.env.SIGNATURE_PATH, "utf8").trim();
+          const url = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${tag}/Leclog_aarch64.app.tar.gz`;
+          const manifest = {
+            version,
+            notes: "",
+            pub_date: new Date().toISOString(),
+            platforms: {
+              "darwin-aarch64": { signature, url },
+              "darwin-aarch64-app": { signature, url },
+            },
+          };
+
+          fs.writeFileSync("latest.json", `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+          gh release upload "${RELEASE_TAG}" \
+            "${work_dir}/Leclog_aarch64.app.tar.gz.sig" \
+            latest.json \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
