@@ -201,7 +201,7 @@ export function SessionDetailPage() {
 
   const sourceLabel = getCaptureSourceLabel(session.captureSource);
   const canDeleteSession = session.status !== "recording";
-  const hasReviewAudio = Boolean(
+  const hasReviewMedia = Boolean(
     session.normalizedAudioPath ||
       session.livePreviewAudioPath ||
       session.audioFilePaths.length > 0,
@@ -404,7 +404,7 @@ export function SessionDetailPage() {
                     ? "Timeline follows the current playback position. Manual scrolling pauses it."
                     : "Resume automatic scrolling to the current playback position."
                 }
-                disabled={!hasReviewAudio}
+                disabled={!hasReviewMedia}
                 onClick={() => setFollowPlayback((current) => !current)}
               >
                 Follow playback
@@ -427,13 +427,13 @@ export function SessionDetailPage() {
               emptyMessage="No transcript segments were saved for this session."
               canPolish={false}
               activeTimeMs={activeTimeMs}
-              syncActiveTime={hasReviewAudio && followPlayback}
+              syncActiveTime={hasReviewMedia && followPlayback}
               activeView="timeline"
               hideViewTabs
               fillAvailable
               onTimelineUserScroll={() => setFollowPlayback(false)}
               onSeek={
-                hasReviewAudio
+                hasReviewMedia
                   ? (timeMs) => {
                       setFollowPlayback(true);
                       setSeekRequest({ timeMs, requestedAt: Date.now() });
