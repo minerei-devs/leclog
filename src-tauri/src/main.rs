@@ -12,12 +12,43 @@ use state::{
 };
 use tauri::Manager;
 
+#[cfg(target_os = "macos")]
+fn configure_macos_window_chrome(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use objc2_app_kit::{NSColor, NSWindow};
+
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_title_bar_style(tauri::TitleBarStyle::Transparent)?;
+        let ns_window = window.ns_window()? as *mut NSWindow;
+        unsafe {
+            let background = NSColor::colorWithDeviceRed_green_blue_alpha(0.0, 0.0, 0.0, 1.0);
+            ns_window
+                .as_ref()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Failed to access the macOS NSWindow.",
+                    )
+                })?
+                .setBackgroundColor(Some(&background));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_macos_window_chrome(_app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|app| {
+            configure_macos_window_chrome(app)?;
+
             let mut sessions = storage::load_sessions(app.handle())?;
             if storage::prepare_sessions_on_startup(app.handle(), &mut sessions)? {
                 storage::persist_sessions(app.handle(), &sessions)?;
@@ -48,8 +79,9 @@ fn main() {
                     )
                     .unwrap_or(None);
                 if let Some(task) = task {
-                    let settings = storage::load_processing_settings(app.handle())
-                        .unwrap_or_default();
+                    let settings = session.processing_settings.clone().unwrap_or_else(|| {
+                        storage::load_processing_settings(app.handle()).unwrap_or_default()
+                    });
                     commands::session_commands::spawn_final_transcription_job(
                         app.handle(),
                         &session_id,
@@ -65,7 +97,9 @@ fn main() {
             commands::session_commands::create_session,
             commands::session_commands::import_media_session,
             commands::session_commands::list_sessions,
+            commands::session_commands::list_session_summaries,
             commands::session_commands::get_session,
+            commands::session_commands::update_session_title,
             commands::session_commands::get_runtime_status,
             commands::session_commands::list_resources,
             commands::session_commands::delete_session,

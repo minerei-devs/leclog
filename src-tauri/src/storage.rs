@@ -309,11 +309,7 @@ pub fn persist_processing_settings(app: &AppHandle, settings: &ProcessingSetting
 }
 
 pub fn normalize_processing_settings(mut settings: ProcessingSettings) -> ProcessingSettings {
-    if settings.language.trim().is_empty() {
-        settings.language = String::from("auto");
-    } else {
-        settings.language = settings.language.trim().to_string();
-    }
+    settings.language = normalize_whisper_language_code(&settings.language);
 
     settings.prompt_terms = settings.prompt_terms.trim().to_string();
     settings.preferred_model_id = settings
@@ -349,6 +345,22 @@ pub fn normalize_processing_settings(mut settings: ProcessingSettings) -> Proces
     settings.whisper_threads = settings.whisper_threads.filter(|value| *value > 0).map(|value| value.min(16));
 
     settings
+}
+
+fn normalize_whisper_language_code(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    if normalized.is_empty() {
+        return String::from("auto");
+    }
+
+    match normalized.as_str() {
+        "automatic" | "detect" => String::from("auto"),
+        "english" => String::from("en"),
+        "japanese" | "jp" => String::from("ja"),
+        "chinese" | "cn" | "zh-cn" | "zh-hans" => String::from("zh"),
+        "korean" | "kr" => String::from("ko"),
+        _ => normalized,
+    }
 }
 
 pub fn sessions_file_path(app: &AppHandle) -> Result<PathBuf> {
@@ -1561,6 +1573,12 @@ pub fn write_processed_transcript(app: &AppHandle, session: &LectureSession) -> 
     if let Some(capture_target_label) = &session.capture_target_label {
         output.push_str(&format!("Capture target: {capture_target_label}\n"));
     }
+    if let Some(settings) = &session.processing_settings {
+        output.push_str(&format!("Language: {}\n", settings.language));
+        if let Some(model_id) = &settings.preferred_model_id {
+            output.push_str(&format!("Preferred model: {model_id}\n"));
+        }
+    }
     if let Some(normalized_audio_path) = &session.normalized_audio_path {
         output.push_str(&format!("Normalized audio: {normalized_audio_path}\n"));
     }
@@ -1717,11 +1735,11 @@ fn resolve_whisper_language(preferred_language: Option<&str>) -> String {
     preferred_language
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .map(normalize_whisper_language_code)
         .or_else(|| {
             env::var("LECLOG_WHISPER_LANGUAGE")
                 .ok()
-                .map(|value| value.trim().to_string())
+                .map(|value| normalize_whisper_language_code(&value))
                 .filter(|value| !value.is_empty())
         })
         .unwrap_or_else(|| String::from("auto"))
@@ -2310,5 +2328,22 @@ mod tests {
         assert_eq!(settings.whisper_threads, None);
         assert_eq!(settings.max_parallel_chunks, 4);
         assert_eq!(settings.live_refresh_interval_seconds, 30);
+    }
+
+    #[test]
+    fn normalizes_common_language_aliases() {
+        let settings = normalize_processing_settings(ProcessingSettings {
+            quality_preset: ProcessingQualityPreset::Custom,
+            preferred_model_id: None,
+            language: String::from(" jp "),
+            prompt_terms: String::new(),
+            chunk_duration_minutes: 10,
+            chunk_overlap_seconds: 20,
+            whisper_threads: None,
+            max_parallel_chunks: 1,
+            live_refresh_interval_seconds: 4,
+        });
+
+        assert_eq!(settings.language, "ja");
     }
 }

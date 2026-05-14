@@ -4,7 +4,8 @@
       {
         "label": "main",
         "hiddenTitle": true,
-        "titleBarStyle": "Transparent"
+        "titleBarStyle": "Transparent",
+        "backgroundColor": "#000000"
       }
     ]
   }

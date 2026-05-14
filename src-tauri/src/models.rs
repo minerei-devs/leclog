@@ -104,6 +104,25 @@ pub struct LectureSession {
     pub last_resumed_at: Option<String>,
     #[serde(default)]
     pub capture_target_label: Option<String>,
+    #[serde(default)]
+    pub processing_settings: Option<ProcessingSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub capture_source: CaptureSource,
+    pub status: SessionStatus,
+    pub duration_ms: u64,
+    pub transcript_phase: TranscriptPhase,
+    pub transcript_error: Option<String>,
+    pub audio_level: Option<f32>,
+    pub capture_target_label: Option<String>,
+    pub segment_count: usize,
 }
 
 impl LectureSession {
@@ -207,10 +226,8 @@ impl Default for ProcessingSettings {
         Self {
             quality_preset: ProcessingQualityPreset::Balanced,
             preferred_model_id: None,
-            language: String::from("ja"),
-            prompt_terms: String::from(
-                "これは大学の講義の書き起こしです。自然な日本語の句読点（、。）を補って出力してください。授業、講義、先生、学生、発表。",
-            ),
+            language: String::from("auto"),
+            prompt_terms: String::new(),
             chunk_duration_minutes: 10,
             chunk_overlap_seconds: 20,
             whisper_threads: None,
@@ -363,6 +380,7 @@ mod tests {
             audio_level: None,
             last_resumed_at: None,
             capture_target_label: None,
+            processing_settings: None,
         }
     }
 

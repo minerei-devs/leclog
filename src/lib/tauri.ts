@@ -7,15 +7,30 @@ import type {
   ProcessingSettings,
   ResourceOverview,
   RuntimeStatus,
+  SessionSummary,
   TranscriptionModelInfo,
   TranscriptionSettings,
   TranscriptSegment,
 } from "../types/session";
 
-export function createSession(title?: string, captureSource?: CaptureSource) {
+export function createSession(
+  title?: string,
+  captureSource?: CaptureSource,
+  settings?: Partial<TranscriptionSettings & ProcessingSettings>,
+) {
   return invoke<LectureSession>("create_session", {
     title: title?.trim() ? title.trim() : null,
     captureSource: captureSource ?? "microphone",
+    preferredModelId: settings?.preferredModelId ?? null,
+    preferredLanguage:
+      settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
+    promptTerms: settings?.promptTerms?.trim() || null,
+    qualityPreset: settings?.qualityPreset ?? null,
+    chunkDurationMinutes: settings?.chunkDurationMinutes ?? null,
+    chunkOverlapSeconds: settings?.chunkOverlapSeconds ?? null,
+    whisperThreads: settings?.whisperThreads ?? null,
+    maxParallelChunks: settings?.maxParallelChunks ?? null,
+    liveRefreshIntervalSeconds: settings?.liveRefreshIntervalSeconds ?? null,
   });
 }
 
@@ -44,8 +59,19 @@ export function listSessions() {
   return invoke<LectureSession[]>("list_sessions");
 }
 
+export function listSessionSummaries() {
+  return invoke<SessionSummary[]>("list_session_summaries");
+}
+
 export function getSession(id: string) {
   return invoke<LectureSession>("get_session", { id });
+}
+
+export function updateSessionTitle(sessionId: string, title: string) {
+  return invoke<LectureSession>("update_session_title", {
+    sessionId,
+    title: title.trim(),
+  });
 }
 
 export function listTranscriptionModels() {
@@ -216,7 +242,7 @@ export function listResources() {
 }
 
 export function deleteSession(sessionId: string) {
-  return invoke<LectureSession[]>("delete_session", { sessionId });
+  return invoke<void>("delete_session", { sessionId });
 }
 
 export function deleteResource(

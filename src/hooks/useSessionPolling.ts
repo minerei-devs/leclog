@@ -1,6 +1,6 @@
 import { useEffect } from "react";
-import { getSession, listSessions } from "../lib/tauri";
-import type { LectureSession } from "../types/session";
+import { getSession, listSessionSummaries, listSessions } from "../lib/tauri";
+import type { LectureSession, SessionSummary } from "../types/session";
 
 interface UseSessionPollingOptions {
   sessionId?: string | null;
@@ -8,6 +8,7 @@ interface UseSessionPollingOptions {
   intervalMs?: number;
   onSession?: (session: LectureSession) => void;
   onSessions?: (sessions: LectureSession[]) => void;
+  onSessionSummaries?: (sessions: SessionSummary[]) => void;
   onError?: (message: string) => void;
 }
 
@@ -17,6 +18,7 @@ export function useSessionPolling({
   intervalMs = 1_000,
   onSession,
   onSessions,
+  onSessionSummaries,
   onError,
 }: UseSessionPollingOptions) {
   useEffect(() => {
@@ -36,9 +38,19 @@ export function useSessionPolling({
           return;
         }
 
-        const sessions = await listSessions();
-        if (isActive) {
-          onSessions?.(sessions);
+        if (onSessionSummaries) {
+          const sessions = await listSessionSummaries();
+          if (isActive) {
+            onSessionSummaries(sessions);
+          }
+          return;
+        }
+
+        if (onSessions) {
+          const sessions = await listSessions();
+          if (isActive) {
+            onSessions(sessions);
+          }
         }
       } catch (error) {
         if (isActive && onError) {
@@ -56,5 +68,5 @@ export function useSessionPolling({
       isActive = false;
       window.clearInterval(intervalId);
     };
-  }, [enabled, intervalMs, onError, onSession, onSessions, sessionId]);
+  }, [enabled, intervalMs, onError, onSession, onSessionSummaries, onSessions, sessionId]);
 }

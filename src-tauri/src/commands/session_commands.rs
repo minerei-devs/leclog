@@ -14,7 +14,7 @@ use crate::{
         BackgroundTask, BackgroundTaskKind, CaptureSource, LectureSession,
         ManagedTranscriptionModel, ProcessingQualityPreset, ProcessingSettings, ResourceItem,
         ResourceKind, ResourceOverview, RuntimeStatus, SessionStatus, TranscriptPhase,
-        TranscriptSegment, TranscriptionModelInfo,
+        SessionSummary, TranscriptSegment, TranscriptionModelInfo,
     },
     state::{
         AudioMeterState, ModelDownloadState, SessionState, SystemAudioCaptureState,
@@ -82,6 +82,31 @@ fn present_session_with_meter(
         snapshot.audio_level = audio_meter.get(&snapshot.id).ok().flatten();
     }
     snapshot
+}
+
+fn summarize_session(
+    session: &LectureSession,
+    audio_meter: Option<&State<'_, AudioMeterState>>,
+) -> SessionSummary {
+    let duration_ms = effective_duration_ms(session)
+        .map(|effective| session.duration_ms.max(effective))
+        .unwrap_or(session.duration_ms);
+    let audio_level = audio_meter.and_then(|meter| meter.get(&session.id).ok().flatten());
+
+    SessionSummary {
+        id: session.id.clone(),
+        title: session.title.clone(),
+        created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+        capture_source: session.capture_source.clone(),
+        status: session.status.clone(),
+        duration_ms,
+        transcript_phase: session.transcript_phase.clone(),
+        transcript_error: session.transcript_error.clone(),
+        audio_level,
+        capture_target_label: session.capture_target_label.clone(),
+        segment_count: session.segments.len(),
+    }
 }
 
 fn finalize_active_duration(session: &mut LectureSession) -> Result<(), String> {
@@ -384,8 +409,29 @@ pub fn create_session(
     state: State<'_, SessionState>,
     title: Option<String>,
     capture_source: Option<String>,
+    preferred_model_id: Option<String>,
+    preferred_language: Option<String>,
+    prompt_terms: Option<String>,
+    quality_preset: Option<String>,
+    chunk_duration_minutes: Option<u32>,
+    chunk_overlap_seconds: Option<u32>,
+    whisper_threads: Option<u32>,
+    max_parallel_chunks: Option<u32>,
+    live_refresh_interval_seconds: Option<u32>,
 ) -> Result<LectureSession, String> {
     let timestamp = now_iso();
+    let settings = resolve_processing_settings(
+        &app,
+        preferred_model_id,
+        preferred_language,
+        prompt_terms,
+        quality_preset,
+        chunk_duration_minutes,
+        chunk_overlap_seconds,
+        whisper_threads,
+        max_parallel_chunks,
+        live_refresh_interval_seconds,
+    );
     let mut session = LectureSession {
         id: Uuid::new_v4().to_string(),
         title: title
@@ -413,6 +459,7 @@ pub fn create_session(
         audio_level: None,
         last_resumed_at: None,
         capture_target_label: None,
+        processing_settings: Some(settings),
     };
     storage::ensure_session_paths(&app, &mut session)
         .map_err(|error| format!("Failed to initialize session storage: {error}"))?;
@@ -424,6 +471,33 @@ pub fn create_session(
     persist_snapshot(&app, &snapshot)?;
 
     Ok(present_session(&created))
+}
+
+#[tauri::command]
+pub fn update_session_title(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    session_id: String,
+    title: String,
+) -> Result<LectureSession, String> {
+    let next_title = title.trim().to_string();
+    if next_title.is_empty() {
+        return Err(String::from("Session title cannot be empty."));
+    }
+
+    let (updated, snapshot) = state.mutate(|sessions| {
+        let session = sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
+
+        session.title = next_title;
+        session.updated_at = now_iso();
+        Ok(session.clone())
+    })?;
+    persist_snapshot(&app, &snapshot)?;
+
+    Ok(present_session(&updated))
 }
 
 #[tauri::command]
@@ -444,6 +518,18 @@ pub fn import_media_session(
     live_refresh_interval_seconds: Option<u32>,
 ) -> Result<LectureSession, String> {
     let timestamp = now_iso();
+    let settings = resolve_processing_settings(
+        &app,
+        preferred_model_id,
+        preferred_language,
+        prompt_terms,
+        quality_preset,
+        chunk_duration_minutes,
+        chunk_overlap_seconds,
+        whisper_threads,
+        max_parallel_chunks,
+        live_refresh_interval_seconds,
+    );
     let mut session = LectureSession {
         id: Uuid::new_v4().to_string(),
         title: title
@@ -471,6 +557,7 @@ pub fn import_media_session(
         audio_level: None,
         last_resumed_at: None,
         capture_target_label: None,
+        processing_settings: Some(settings.clone()),
     };
     storage::ensure_session_paths(&app, &mut session)
         .map_err(|error| format!("Failed to initialize session storage: {error}"))?;
@@ -489,19 +576,6 @@ pub fn import_media_session(
     )? else {
         return Ok(present_session(&created));
     };
-    let settings = resolve_processing_settings(
-        &app,
-        preferred_model_id,
-        preferred_language,
-        prompt_terms,
-        quality_preset,
-        chunk_duration_minutes,
-        chunk_overlap_seconds,
-        whisper_threads,
-        max_parallel_chunks,
-        live_refresh_interval_seconds,
-    );
-
     spawn_final_transcription_job(
         &app,
         &created.id,
@@ -524,6 +598,21 @@ pub fn list_sessions(
         .iter()
         .map(|session| present_session_with_meter(session, Some(&audio_meter)))
         .collect())
+}
+
+#[tauri::command]
+pub fn list_session_summaries(
+    state: State<'_, SessionState>,
+    audio_meter: State<'_, AudioMeterState>,
+) -> Result<Vec<SessionSummary>, String> {
+    state.read(|sessions| {
+        let mut summaries = sessions
+            .iter()
+            .map(|session| summarize_session(session, Some(&audio_meter)))
+            .collect::<Vec<_>>();
+        summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(summaries)
+    })
 }
 
 #[tauri::command]
@@ -1240,28 +1329,6 @@ pub fn save_session(
     max_parallel_chunks: Option<u32>,
     live_refresh_interval_seconds: Option<u32>,
 ) -> Result<(), String> {
-    let (processing, snapshot) = state.mutate(|sessions| {
-        let session = sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-            .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
-
-        storage::ensure_session_paths(&app, session)
-            .map_err(|error| format!("Failed to prepare session storage: {error}"))?;
-        session.updated_at = now_iso();
-        session.last_resumed_at = None;
-        session.transcript_phase = TranscriptPhase::Processing;
-        session.transcript_error = None;
-        Ok(session.clone())
-    })?;
-    persist_snapshot(&app, &snapshot)?;
-
-    let Some(task) = tasks.start_final_task(
-        &session_id,
-        format!("Transcribe session: {}", processing.title),
-    )? else {
-        return Ok(());
-    };
     let settings = resolve_processing_settings(
         &app,
         preferred_model_id,
@@ -1274,7 +1341,29 @@ pub fn save_session(
         max_parallel_chunks,
         live_refresh_interval_seconds,
     );
+    let (processing, snapshot) = state.mutate(|sessions| {
+        let session = sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
 
+        storage::ensure_session_paths(&app, session)
+            .map_err(|error| format!("Failed to prepare session storage: {error}"))?;
+        session.updated_at = now_iso();
+        session.last_resumed_at = None;
+        session.transcript_phase = TranscriptPhase::Processing;
+        session.transcript_error = None;
+        session.processing_settings = Some(settings.clone());
+        Ok(session.clone())
+    })?;
+    persist_snapshot(&app, &snapshot)?;
+
+    let Some(task) = tasks.start_final_task(
+        &session_id,
+        format!("Transcribe session: {}", processing.title),
+    )? else {
+        return Ok(());
+    };
     spawn_final_transcription_job(
         &app,
         &session_id,
@@ -1368,11 +1457,12 @@ pub fn get_runtime_status(
         detect_whisper_acceleration(&whisper_cli_path, whisper_available);
     let installed_models = storage::list_transcription_models(&app)
         .map_err(|error| format!("Failed to list transcription models: {error}"))?;
-    let sessions = state.clone_sessions()?;
-    let processing_session_count = sessions
-        .iter()
-        .filter(|session| session.status == SessionStatus::Processing)
-        .count();
+    let processing_session_count = state.read(|sessions| {
+        Ok(sessions
+            .iter()
+            .filter(|session| session.status == SessionStatus::Processing)
+            .count())
+    })?;
     let partial_download_count = storage::list_partial_downloads(&app)
         .map(|partials| partials.len())
         .unwrap_or(0);
@@ -1509,7 +1599,7 @@ pub fn delete_session(
     capture_state: State<'_, SystemAudioCaptureState>,
     audio_meter: State<'_, AudioMeterState>,
     session_id: String,
-) -> Result<Vec<LectureSession>, String> {
+) -> Result<(), String> {
     let session = state
         .clone_sessions()?
         .into_iter()
@@ -1555,20 +1645,17 @@ pub fn delete_session(
             .map_err(|error| format!("Failed to delete session directory: {error}"))?;
     }
 
-    let (remaining_sessions, snapshot) = state.mutate(|sessions| {
+    let (_, snapshot) = state.mutate(|sessions| {
         let original_count = sessions.len();
         sessions.retain(|session| session.id != session_id);
         if sessions.len() == original_count {
             return Err(String::from("Session not found."));
         }
-        Ok(sessions.clone())
+        Ok(())
     })?;
     persist_snapshot(&app, &snapshot)?;
 
-    Ok(remaining_sessions
-        .iter()
-        .map(present_session)
-        .collect::<Vec<_>>())
+    Ok(())
 }
 
 #[tauri::command]
@@ -1917,7 +2004,10 @@ pub fn retry_session_processing(
     )? else {
         return Ok(present_session(&processing));
     };
-    let settings = storage::load_processing_settings(&app).unwrap_or_default();
+    let settings = processing
+        .processing_settings
+        .clone()
+        .unwrap_or_else(|| storage::load_processing_settings(&app).unwrap_or_default());
     spawn_final_transcription_job(&app, &session_id, processing.clone(), settings, task);
 
     Ok(present_session(&processing))
@@ -2013,6 +2103,7 @@ mod tests {
             audio_level: None,
             last_resumed_at: None,
             capture_target_label: None,
+            processing_settings: None,
         }
     }
 

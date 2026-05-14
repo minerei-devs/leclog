@@ -1,6 +1,6 @@
 [package]
 name = "leclog"
-version = "0.2.5"
+version = "0.3.0"
 description = "Leclog desktop app"
 authors = ["OpenAI Codex"]
 edition = "2021"
@@ -21,6 +21,7 @@ tauri-plugin-store = "2.0.0"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", features = ["NSColor", "NSWindow"] }
 screencapturekit = { version = "1.5.4", features = ["macos_15_0"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

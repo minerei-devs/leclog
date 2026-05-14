@@ -30,9 +30,8 @@ const defaultRecentState: RecentState = {
 
 const defaultTranscriptionSettings: TranscriptionSettings = {
   preferredModelId: null,
-  preferredLanguage: "ja",
-  promptTerms:
-    "これは大学の講義の書き起こしです。自然な日本語の句読点（、。）を補って出力してください。授業、講義、先生、学生、発表。",
+  preferredLanguage: "auto",
+  promptTerms: "",
 };
 
 const defaultAppSettings: AppSettings = {

@@ -5,9 +5,8 @@ import type { ProcessingSettings } from "@/types/session";
 const fallbackProcessingSettings: ProcessingSettings = {
   qualityPreset: "balanced",
   preferredModelId: null,
-  language: "ja",
-  promptTerms:
-    "これは大学の講義の書き起こしです。自然な日本語の句読点（、。）を補って出力してください。授業、講義、先生、学生、発表。",
+  language: "auto",
+  promptTerms: "",
   chunkDurationMinutes: 10,
   chunkOverlapSeconds: 20,
   whisperThreads: null,

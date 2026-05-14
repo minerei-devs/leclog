@@ -41,6 +41,22 @@ export interface LectureSession {
   audioLevel: number | null;
   lastResumedAt: string | null;
   captureTargetLabel: string | null;
+  processingSettings: ProcessingSettings | null;
+}
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  captureSource: CaptureSource;
+  status: SessionStatus;
+  durationMs: number;
+  transcriptPhase: TranscriptPhase;
+  transcriptError: string | null;
+  audioLevel: number | null;
+  captureTargetLabel: string | null;
+  segmentCount: number;
 }
 
 export interface RecentState {

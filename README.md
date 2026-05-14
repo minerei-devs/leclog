@@ -50,7 +50,8 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
    curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin -o src-tauri/models/ggml-base.bin
    ```
 
-   For Japanese lectures, these settings usually help:
+   Leclog defaults to Whisper language auto-detection. For Japanese lectures,
+   these settings usually help:
 
    ```bash
    export LECLOG_WHISPER_LANGUAGE=ja
@@ -148,8 +149,8 @@ Release flow:
 3. Create and push a tag that matches the version:
 
    ```bash
-   git tag v0.2.5
-   git push origin v0.2.5
+   git tag v0.3.0
+   git push origin v0.3.0
    ```
 
 4. GitHub Actions will build the signed and notarized macOS package, create updater artifacts, and publish the GitHub Release automatically.

@@ -36,6 +36,18 @@ impl SessionState {
         Ok(sessions.clone())
     }
 
+    pub fn read<F, T>(&self, reader: F) -> Result<T, String>
+    where
+        F: FnOnce(&[LectureSession]) -> Result<T, String>,
+    {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| String::from("Failed to acquire session state lock."))?;
+
+        reader(&sessions)
+    }
+
     pub fn mutate<F, T>(&self, mutator: F) -> Result<(T, Vec<LectureSession>), String>
     where
         F: FnOnce(&mut Vec<LectureSession>) -> Result<T, String>,

@@ -20,9 +20,17 @@ import {
 import { getVersion } from "@tauri-apps/api/app";
 import { check } from "@tauri-apps/plugin-updater";
 import type { DownloadEvent, Update } from "@tauri-apps/plugin-updater";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { formatBytes, formatDate } from "@/lib/format";
+import {
+  getLanguageLabel,
+  getLanguageProfileId,
+  isEnglishOnlyModel,
+  languageNeedsMultilingualModel,
+  resolveLikelyTranscriptionModelId,
+  transcriptionLanguageProfiles,
+} from "@/lib/transcriptionLanguageProfiles";
 import {
   cancelBackgroundTask,
   deleteResource,
@@ -33,6 +41,7 @@ import {
   listAvailableTranscriptionModels,
   listBackgroundTasks,
   listResources,
+  listTranscriptionModels,
   revealResource,
   retrySessionProcessing,
 } from "@/lib/tauri";
@@ -51,13 +60,14 @@ import type {
   ResourceKind,
   ResourceOverview,
   RuntimeStatus,
+  TranscriptionModelInfo,
 } from "@/types/session";
+import type { TranscriptionLanguageProfileId } from "@/lib/transcriptionLanguageProfiles";
 import { useAppSettings } from "@/hooks/useAppSettings";
 import { useProcessingSettings } from "@/hooks/useProcessingSettings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { RuntimeSetupPanel } from "@/components/RuntimeSetupPanel";
 
 export type SettingsPanelId = "overview" | "transcription" | "models" | "storage" | "tasks" | "gaps";
 
@@ -250,6 +260,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
   const [resourceOverview, setResourceOverview] = useState<ResourceOverview | null>(null);
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [models, setModels] = useState<ManagedTranscriptionModel[]>([]);
+  const [installedModels, setInstalledModels] = useState<TranscriptionModelInfo[]>([]);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
@@ -261,42 +272,119 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingSettingsDelete>(null);
+  const [languageSelection, setLanguageSelection] = useState<TranscriptionLanguageProfileId>(
+    () => getLanguageProfileId(processingSettings.language),
+  );
+  const [customLanguageDraft, setCustomLanguageDraft] = useState("");
+  const wasOpenRef = useRef(false);
+  const pendingInitialPanelRef = useRef<SettingsPanelId | null>(null);
+  const lastInitialPanelRef = useRef<SettingsPanelId | undefined>(undefined);
 
-  const refresh = useCallback(async () => {
-    const [nextRuntimeStatus, nextResourceOverview, nextTasks, nextModels, nextAppVersion] =
-      await Promise.all([
-        getRuntimeStatus(),
-        listResources(),
-        listBackgroundTasks(),
-        listAvailableTranscriptionModels(),
-        getVersion(),
-      ]);
+  const refreshOverview = useCallback(async () => {
+    const [nextRuntimeStatus, nextTasks, nextAppVersion] = await Promise.all([
+      getRuntimeStatus(),
+      listBackgroundTasks(),
+      getVersion(),
+    ]);
     setRuntimeStatus(nextRuntimeStatus);
-    setResourceOverview(nextResourceOverview);
     setTasks(nextTasks);
-    setModels(nextModels);
     setAppVersion(nextAppVersion);
     setError(null);
   }, []);
 
+  const refreshOverviewLight = useCallback(async () => {
+    const [nextTasks, nextAppVersion] = await Promise.all([
+      listBackgroundTasks(),
+      getVersion(),
+    ]);
+    setTasks(nextTasks);
+    setAppVersion(nextAppVersion);
+    setError(null);
+  }, []);
+
+  const refreshStorage = useCallback(async () => {
+    const nextResourceOverview = await listResources();
+    setResourceOverview(nextResourceOverview);
+    setError(null);
+  }, []);
+
+  const refreshTasks = useCallback(async () => {
+    const nextTasks = await listBackgroundTasks();
+    setTasks(nextTasks);
+    setError(null);
+  }, []);
+
+  const refreshModels = useCallback(async () => {
+    const [nextModels, nextInstalledModels] = await Promise.all([
+      listAvailableTranscriptionModels(),
+      listTranscriptionModels(),
+    ]);
+    setModels(nextModels);
+    setInstalledModels(nextInstalledModels);
+    setError(null);
+  }, []);
+
+  const refreshPanel = useCallback(
+    async (panel: SettingsPanelId) => {
+      if (panel === "overview") {
+        if (runtimeStatus) {
+          await refreshOverviewLight();
+        } else {
+          await refreshOverview();
+        }
+        return;
+      }
+      if (panel === "storage") {
+        await refreshStorage();
+        return;
+      }
+      if (panel === "models" || panel === "transcription") {
+        await refreshModels();
+        return;
+      }
+      if (panel === "tasks") {
+        await refreshTasks();
+        return;
+      }
+      setError(null);
+    },
+    [refreshModels, refreshOverview, refreshOverviewLight, refreshStorage, refreshTasks, runtimeStatus],
+  );
+
   useEffect(() => {
     if (!isOpen) {
+      wasOpenRef.current = false;
+      pendingInitialPanelRef.current = null;
+      lastInitialPanelRef.current = undefined;
       return;
     }
-    if (initialPanel) {
-      setActivePanel(initialPanel);
+    const shouldApplyInitialPanel =
+      !wasOpenRef.current || initialPanel !== lastInitialPanelRef.current;
+    if (shouldApplyInitialPanel) {
+      const nextPanel = initialPanel ?? "overview";
+      pendingInitialPanelRef.current = nextPanel;
+      setActivePanel(nextPanel);
     }
+    wasOpenRef.current = true;
+    lastInitialPanelRef.current = initialPanel;
   }, [initialPanel, isOpen]);
 
   useEffect(() => {
     if (!isOpen) {
       return;
     }
+    if (
+      pendingInitialPanelRef.current !== null &&
+      activePanel !== pendingInitialPanelRef.current
+    ) {
+      return;
+    }
+    pendingInitialPanelRef.current = null;
 
-    void refresh().catch((reason) => {
+    void refreshPanel(activePanel).catch((reason) => {
       setError(reason instanceof Error ? reason.message : "Failed to load settings.");
     });
-  }, [isOpen, refresh]);
+  }, [activePanel, isOpen, refreshPanel]);
 
   useEffect(() => {
     if (!isOpen || !tasks.some(isActiveTask)) {
@@ -304,10 +392,13 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
     }
 
     const intervalId = window.setInterval(() => {
-      void refresh().catch(() => {});
+      void refreshTasks().catch(() => {});
+      if (activePanel === "models") {
+        void refreshModels().catch(() => {});
+      }
     }, 1500);
     return () => window.clearInterval(intervalId);
-  }, [isOpen, refresh, tasks]);
+  }, [activePanel, isOpen, refreshModels, refreshTasks, tasks]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -327,7 +418,21 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose, pendingDelete]);
 
+  useEffect(() => {
+    const nextSelection = getLanguageProfileId(processingSettings.language);
+    setLanguageSelection(nextSelection);
+    setCustomLanguageDraft(nextSelection === "custom" ? processingSettings.language : "");
+  }, [processingSettings.language]);
+
   const installedCount = models.filter((model) => model.installed).length;
+  const installedModelIds = installedModels.map((model) => model.id);
+  const likelyModelId = resolveLikelyTranscriptionModelId(processingSettings, installedModelIds);
+  const modelLanguageWarning =
+    likelyModelId &&
+    isEnglishOnlyModel(likelyModelId) &&
+    languageNeedsMultilingualModel(processingSettings.language)
+      ? `${likelyModelId} is English-only. ${getLanguageLabel(processingSettings.language)} needs a multilingual model such as Base, Small, or Large v3 Turbo.`
+      : null;
   const preferredModelLabel =
     models.find((model) => model.id === processingSettings.preferredModelId)?.label ??
     processingSettings.preferredModelId ??
@@ -361,7 +466,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
     try {
       if (resource.kind === "sessionDir" && resource.sessionId) {
         await deleteSession(resource.sessionId);
-        await refresh();
+        await refreshStorage();
         window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
         setPendingDelete(null);
         return;
@@ -369,7 +474,9 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
 
       const nextOverview = await deleteResource(resource.path, resource.sessionId, resource.modelId);
       setResourceOverview(nextOverview);
-      await refresh();
+      if (resource.kind === "model" || resource.kind === "partialDownload") {
+        await refreshModels();
+      }
       if (resource.kind === "sessionDir") {
         window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
       }
@@ -385,7 +492,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
     setBusyId(modelId);
     try {
       await downloadTranscriptionModel(modelId);
-      await refresh();
+      await Promise.all([refreshTasks(), refreshModels()]);
       setActivePanel("tasks");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to start model download.");
@@ -401,7 +508,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
       if (processingSettings.preferredModelId === modelId) {
         await updateSettings({ preferredModelId: null });
       }
-      await refresh();
+      await refreshModels();
       setPendingDelete(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to delete model.");
@@ -421,6 +528,30 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
     }
 
     await handleDeleteModel(pendingDelete.modelId);
+  }
+
+  function handleLanguageSelectionChange(value: TranscriptionLanguageProfileId) {
+    setLanguageSelection(value);
+    if (value === "custom") {
+      setCustomLanguageDraft(
+        processingSettings.language === "auto" ? "" : processingSettings.language,
+      );
+      return;
+    }
+
+    const profile = transcriptionLanguageProfiles.find((item) => item.id === value);
+    if (!profile) {
+      return;
+    }
+    void updateSettings({
+      language: profile.language,
+      promptTerms: profile.promptTerms,
+    });
+  }
+
+  function handleCustomLanguageChange(value: string) {
+    setCustomLanguageDraft(value);
+    void updateSettings({ language: value.trim() || "auto" });
   }
 
   function handleUpdateDownloadEvent(event: DownloadEvent) {
@@ -491,7 +622,10 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
     setBusyId(taskId);
     try {
       await cancelBackgroundTask(taskId);
-      await refresh();
+      await refreshTasks();
+      if (activePanel === "models") {
+        await refreshModels();
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to cancel task.");
     } finally {
@@ -512,12 +646,23 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
       } else if (task.sessionId) {
         await retrySessionProcessing(task.sessionId);
       }
-      await refresh();
+      await refreshTasks();
+      if (task.kind === "modelDownload") {
+        await refreshModels();
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to retry task.");
     } finally {
       setBusyId(null);
     }
+  }
+
+  function handleRefreshCurrentPanel() {
+    if (activePanel === "overview") {
+      void refreshOverview();
+      return;
+    }
+    void refreshPanel(activePanel);
   }
 
   if (!isOpen) {
@@ -546,7 +691,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
             </h2>
           </div>
           <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" size="sm" disabled={isBusy} onClick={() => void refresh()}>
+            <Button type="button" variant="outline" size="sm" disabled={isBusy} onClick={handleRefreshCurrentPanel}>
               <RefreshCw className="size-3.5" />
               Refresh
             </Button>
@@ -627,7 +772,6 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
                   />
                   <Stat label="Active tasks" value={String(activeTaskCount)} detail={`${tasks.length} tracked`} />
                 </div>
-                <RuntimeSetupPanel showWhenReady />
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -713,12 +857,18 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
                     ))}
                   </div>
                 ) : null}
-                <div className="grid gap-2 md:grid-cols-4">
-                  <Stat label="Storage" value={formatBytes(resourceOverview?.totalBytes ?? 0)} detail="App data total" />
-                  <Stat label="Sessions" value={formatBytes(resourceOverview?.sessionBytes ?? 0)} />
-                  <Stat label="Models" value={formatBytes(resourceOverview?.modelBytes ?? 0)} />
-                  <Stat label="Processed" value={formatBytes(resourceOverview?.processedBytes ?? 0)} />
-                </div>
+                {resourceOverview ? (
+                  <div className="grid gap-2 md:grid-cols-4">
+                    <Stat label="Storage" value={formatBytes(resourceOverview.totalBytes)} detail="App data total" />
+                    <Stat label="Sessions" value={formatBytes(resourceOverview.sessionBytes)} />
+                    <Stat label="Models" value={formatBytes(resourceOverview.modelBytes)} />
+                    <Stat label="Processed" value={formatBytes(resourceOverview.processedBytes)} />
+                  </div>
+                ) : (
+                  <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                    Storage totals load when you open the Storage panel.
+                  </p>
+                )}
               </div>
             ) : null}
 
@@ -745,13 +895,27 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
                   <label className="grid gap-1 text-sm">
-                    <span className="font-medium text-slate-700">Language</span>
-                    <input
+                    <span className="font-medium text-slate-700">Default language</span>
+                    <select
                       className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
-                      value={processingSettings.language}
-                      onChange={(event) => void updateSettings({ language: event.target.value.trim() || "auto" })}
+                      value={languageSelection}
+                      onChange={(event) =>
+                        handleLanguageSelectionChange(event.target.value as TranscriptionLanguageProfileId)
+                      }
                       disabled={!settingsLoaded}
-                    />
+                    >
+                      {transcriptionLanguageProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.label}
+                        </option>
+                      ))}
+                      <option value="custom">Custom code</option>
+                    </select>
+                    <span className="truncate text-xs text-slate-500">
+                      {languageSelection === "custom"
+                        ? "Use a Whisper language code."
+                        : transcriptionLanguageProfiles.find((profile) => profile.id === languageSelection)?.description}
+                    </span>
                   </label>
                   <label className="grid gap-1 text-sm">
                     <span className="font-medium text-slate-700">Preferred model</span>
@@ -771,7 +935,25 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
                       ))}
                     </select>
                   </label>
+                  {languageSelection === "custom" ? (
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium text-slate-700">Custom language code</span>
+                      <input
+                        className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
+                        value={customLanguageDraft}
+                        placeholder="fr, de, es..."
+                        onChange={(event) => handleCustomLanguageChange(event.target.value)}
+                        disabled={!settingsLoaded}
+                      />
+                    </label>
+                  ) : null}
                 </div>
+                {modelLanguageWarning ? (
+                  <p className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600" />
+                    <span>{modelLanguageWarning}</span>
+                  </p>
+                ) : null}
                 <label className="grid gap-1 text-sm">
                   <span className="font-medium text-slate-700">Prompt terms</span>
                   <input

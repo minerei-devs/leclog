@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { ArrowUpRight, Import, Play, Settings2 } from "lucide-react";
+import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
+import { ArrowUpRight, Import, MessageSquareText, Play, Settings2, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useNavigate } from "react-router-dom";
 import { useRecentState } from "@/hooks/useRecentState";
@@ -7,8 +7,27 @@ import { useProcessingSettings } from "@/hooks/useProcessingSettings";
 import { getErrorMessage } from "@/lib/errors";
 import { getSessionHref } from "@/lib/session";
 import { buildDefaultDraftTitle } from "@/lib/store";
-import { createSession, importMediaSession, listSessions, startSessionRecording } from "@/lib/tauri";
-import type { CaptureSource, LectureSession } from "@/types/session";
+import {
+  createSession,
+  importMediaSession,
+  listAvailableTranscriptionModels,
+  listSessionSummaries,
+  startSessionRecording,
+} from "@/lib/tauri";
+import {
+  getLanguageLabel,
+  getLanguageProfileId,
+  transcriptionLanguageProfiles,
+} from "@/lib/transcriptionLanguageProfiles";
+import type { TranscriptionLanguageProfileId } from "@/lib/transcriptionLanguageProfiles";
+import type {
+  CaptureSource,
+  LectureSession,
+  ManagedTranscriptionModel,
+  ProcessingQualityPreset,
+  ProcessingSettings,
+  SessionSummary,
+} from "@/types/session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -66,22 +85,272 @@ function isGeneratedDraftTitle(value: string) {
   return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value.trim());
 }
 
+const presetLabels: Record<ProcessingQualityPreset, string> = {
+  fast: "Fast",
+  balanced: "Balanced",
+  accurate: "Accurate",
+  custom: "Custom",
+};
+
+function getModelLabel(
+  modelId: string | null | undefined,
+  models: ManagedTranscriptionModel[],
+) {
+  if (!modelId) {
+    return "Preset model";
+  }
+  return models.find((model) => model.id === modelId)?.label ?? modelId;
+}
+
+function TranscriptionSettingsDialog({
+  open,
+  settings,
+  languageSelection,
+  models,
+  onSettingsChange,
+  onLanguageSelectionChange,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  settings: ProcessingSettings;
+  languageSelection: TranscriptionLanguageProfileId;
+  models: ManagedTranscriptionModel[];
+  onSettingsChange: (settings: ProcessingSettings) => void;
+  onLanguageSelectionChange: (value: TranscriptionLanguageProfileId) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const titleId = useId();
+  const descriptionId = useId();
+  const installedModels = models.filter((model) => model.installed);
+  const selectedModel = settings.preferredModelId
+    ? models.find((model) => model.id === settings.preferredModelId) ?? null
+    : null;
+  const modelOptions =
+    selectedModel && !installedModels.some((model) => model.id === selectedModel.id)
+      ? [selectedModel, ...installedModels]
+      : installedModels;
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onCancel();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel, open]);
+
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-[2px]"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+    >
+      <button
+        type="button"
+        className="absolute inset-0 cursor-default"
+        aria-label="Close transcription settings"
+        onClick={onCancel}
+      />
+      <section className="relative grid w-full max-w-2xl gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-2xl">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="mt-0.5 rounded-lg border border-blue-100 bg-blue-50 p-2 text-blue-700">
+              <Settings2 className="size-4" />
+            </div>
+            <div className="min-w-0">
+              <h2 id={titleId} className="text-base font-semibold text-slate-950">
+                Transcription settings
+              </h2>
+              <p id={descriptionId} className="mt-1 text-sm leading-5 text-slate-600">
+                Choose the model, recognition behavior, and prompt terms for this session.
+              </p>
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Close transcription settings"
+            onClick={onCancel}
+          >
+            <X className="size-4" />
+          </Button>
+        </div>
+
+        <div className="grid gap-4">
+          <div className="grid gap-2">
+            <Label className="text-xs font-medium text-slate-600">Quality</Label>
+            <div className="flex flex-wrap gap-2">
+              {(Object.keys(presetLabels) as ProcessingQualityPreset[]).map((preset) => (
+                <Button
+                  key={preset}
+                  type="button"
+                  variant={settings.qualityPreset === preset ? "default" : "outline"}
+                  size="sm"
+                  onClick={() =>
+                    onSettingsChange({
+                      ...settings,
+                      qualityPreset: preset,
+                    })
+                  }
+                >
+                  {presetLabels[preset]}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="grid gap-1.5 text-sm">
+              <span className="font-medium text-slate-700">Model</span>
+              <select
+                className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-blue-400 focus:ring-3 focus:ring-blue-100"
+                value={settings.preferredModelId ?? ""}
+                onChange={(event) =>
+                  onSettingsChange({
+                    ...settings,
+                    preferredModelId: event.target.value || null,
+                  })
+                }
+                autoFocus
+              >
+                <option value="">Preset default</option>
+                {modelOptions.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label}
+                  </option>
+                ))}
+              </select>
+              <span className="truncate text-xs text-slate-500">
+                {installedModels.length > 0
+                  ? getModelLabel(settings.preferredModelId, models)
+                  : "No local models are installed yet."}
+              </span>
+            </label>
+
+            <label className="grid gap-1.5 text-sm">
+              <span className="font-medium text-slate-700">Transcript language</span>
+              <select
+                className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-blue-400 focus:ring-3 focus:ring-blue-100"
+                value={languageSelection}
+                onChange={(event) =>
+                  onLanguageSelectionChange(event.target.value as TranscriptionLanguageProfileId)
+                }
+              >
+                {transcriptionLanguageProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.label}
+                  </option>
+                ))}
+                <option value="custom">Custom code</option>
+              </select>
+              <span className="truncate text-xs text-slate-500">
+                {languageSelection === "custom"
+                  ? "Use a Whisper language code."
+                  : transcriptionLanguageProfiles.find((profile) => profile.id === languageSelection)?.description}
+              </span>
+            </label>
+          </div>
+
+          {languageSelection === "custom" ? (
+            <label className="grid gap-1.5 text-sm">
+              <span className="font-medium text-slate-700">Custom language code</span>
+              <Input
+                value={settings.language === "auto" ? "" : settings.language}
+                placeholder="fr, de, es..."
+                className="h-10 rounded-lg border-slate-300 bg-white text-sm"
+                onChange={(event) =>
+                  onSettingsChange({
+                    ...settings,
+                    language: event.target.value.trim() || "auto",
+                  })
+                }
+              />
+            </label>
+          ) : null}
+
+          <label className="grid gap-1.5 text-sm">
+            <span className="font-medium text-slate-700">Prompt terms</span>
+            <textarea
+              value={settings.promptTerms}
+              onChange={(event) =>
+                onSettingsChange({
+                  ...settings,
+                  promptTerms: event.target.value,
+                })
+              }
+              className="min-h-36 w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400 focus:border-blue-400 focus:ring-3 focus:ring-blue-100"
+              placeholder="授業 講義 先生 学生 発表&#10;course-specific names, terms, acronyms..."
+            />
+          </label>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <Button type="button" variant="outline" size="sm" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button type="button" size="sm" onClick={onConfirm}>
+            Save settings
+          </Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function SessionListPage() {
   const navigate = useNavigate();
   const { recentState, isLoaded, updateRecentState } = useRecentState();
-  const { settings: processingSettings } = useProcessingSettings();
-  const [sessions, setSessions] = useState<LectureSession[]>([]);
+  const {
+    settings: processingSettings,
+    isLoaded: processingSettingsLoaded,
+  } = useProcessingSettings();
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [models, setModels] = useState<ManagedTranscriptionModel[]>([]);
+  const [draftProcessingSettings, setDraftProcessingSettings] = useState(processingSettings);
+  const [settingsDialogDraft, setSettingsDialogDraft] = useState(processingSettings);
+  const [settingsDialogLanguageSelection, setSettingsDialogLanguageSelection] =
+    useState<TranscriptionLanguageProfileId>(
+    () => getLanguageProfileId(processingSettings.language),
+  );
   const [draftTitle, setDraftTitle] = useState("");
   const [draftCaptureSource, setDraftCaptureSource] =
     useState<CaptureSource>("microphone");
   const [isStarting, setIsStarting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isImportDragActive, setIsImportDragActive] = useState(false);
+  const [isSettingsDialogOpen, setIsSettingsDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void listSessions().then(setSessions).catch(() => {});
+    void listSessionSummaries().then(setSessions).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    void listAvailableTranscriptionModels().then(setModels).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (processingSettingsLoaded) {
+      setDraftProcessingSettings(processingSettings);
+      setSettingsDialogDraft(processingSettings);
+      setSettingsDialogLanguageSelection(getLanguageProfileId(processingSettings.language));
+    }
+  }, [processingSettings, processingSettingsLoaded]);
 
   useEffect(() => {
     if (!isLoaded) {
@@ -154,11 +423,11 @@ export function SessionListPage() {
             const importedSessions: LectureSession[] = [];
             for (const path of paths) {
               importedSessions.push(
-                await importMediaSession(path, undefined, processingSettings),
+                await importMediaSession(path, undefined, draftProcessingSettings),
               );
             }
 
-            const refreshed = await listSessions();
+            const refreshed = await listSessionSummaries();
             if (!isMounted) {
               return;
             }
@@ -186,7 +455,7 @@ export function SessionListPage() {
       isMounted = false;
       unlisten?.();
     };
-  }, [navigate, processingSettings]);
+  }, [draftProcessingSettings, navigate]);
 
   async function handleStartSession(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -194,7 +463,11 @@ export function SessionListPage() {
     setIsStarting(true);
 
     try {
-      const created = await createSession(draftTitle, draftCaptureSource);
+      const created = await createSession(
+        draftTitle,
+        draftCaptureSource,
+        draftProcessingSettings,
+      );
       const recording = await startSessionRecording(created.id);
       const nextDefaultTitle = buildDefaultDraftTitle();
       await updateRecentState({
@@ -211,6 +484,42 @@ export function SessionListPage() {
     }
   }
 
+  function handleSettingsDialogLanguageSelectionChange(value: TranscriptionLanguageProfileId) {
+    setSettingsDialogLanguageSelection(value);
+    if (value === "custom") {
+      setSettingsDialogDraft((current) => ({
+        ...current,
+        language: getLanguageProfileId(current.language) === "custom" ? current.language : "",
+      }));
+      return;
+    }
+
+    const profile = transcriptionLanguageProfiles.find((item) => item.id === value);
+    if (!profile) {
+      return;
+    }
+    setSettingsDialogDraft((current) => ({
+      ...current,
+      language: profile.language,
+      promptTerms: profile.promptTerms,
+    }));
+  }
+
+  function openTranscriptionSettingsDialog() {
+    setSettingsDialogDraft(draftProcessingSettings);
+    setSettingsDialogLanguageSelection(getLanguageProfileId(draftProcessingSettings.language));
+    setIsSettingsDialogOpen(true);
+  }
+
+  function saveTranscriptionSettingsDraft() {
+    setDraftProcessingSettings(settingsDialogDraft);
+    setSettingsDialogLanguageSelection(getLanguageProfileId(settingsDialogDraft.language));
+    setIsSettingsDialogOpen(false);
+  }
+
+  const promptSummary = draftProcessingSettings.promptTerms.trim();
+  const modelSummary = getModelLabel(draftProcessingSettings.preferredModelId, models);
+
   return (
     <section className="grid gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -222,36 +531,13 @@ export function SessionListPage() {
             Capture or import
           </h2>
         </div>
-
-        <div
-          className="flex max-w-full flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600"
-          title="Default transcription settings. App-wide settings are managed in Settings."
-        >
-          <span className="font-medium text-slate-950">
-            {processingSettings.qualityPreset}
-          </span>
-          <span className="max-w-48 truncate">
-            {processingSettings.preferredModelId ?? "Preset model"}
-          </span>
-          <span>{processingSettings.language}</span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            aria-label="Open settings"
-            title="Open settings"
-            onClick={() => window.dispatchEvent(new CustomEvent("leclog:open-settings"))}
-          >
-            <Settings2 className="size-3.5" />
-          </Button>
-        </div>
       </div>
 
       <RuntimeSetupPanel />
 
       <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.58fr)]">
         <form
-          className="grid gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
+          className="flex min-h-full flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
           onSubmit={handleStartSession}
         >
           <div className="grid gap-2">
@@ -270,26 +556,6 @@ export function SessionListPage() {
                 placeholder="2026-04-22 14:30"
                 className="h-10 rounded-lg border-slate-300 bg-white text-base"
               />
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <Button type="submit" size="sm" className="px-3">
-                <Play className="size-4" />
-                {isStarting ? "Starting..." : "Start recording"}
-              </Button>
-
-              {activeSession ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="px-3"
-                  onClick={() => navigate(`/recording/${activeSession.id}`)}
-                >
-                  <ArrowUpRight className="size-4" />
-                  Reopen active
-                </Button>
-              ) : null}
             </div>
           </div>
 
@@ -326,6 +592,60 @@ export function SessionListPage() {
               />
             </RadioGroup>
           </div>
+
+          <div className="grid gap-1.5">
+            <Label className="text-xs font-medium text-slate-600">Transcription</Label>
+            <button
+              type="button"
+              className="grid min-w-0 gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-left transition-colors hover:border-slate-400 hover:bg-white"
+              onClick={openTranscriptionSettingsDialog}
+            >
+              <span className="flex min-w-0 items-center gap-3">
+                <span className="rounded-lg border border-blue-100 bg-blue-50 p-2 text-blue-700">
+                  <Settings2 className="size-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-semibold text-slate-950">
+                    Model, settings, and prompt
+                  </span>
+                  <span className="block truncate text-xs text-slate-500">
+                    {modelSummary} · {presetLabels[draftProcessingSettings.qualityPreset]} · {getLanguageLabel(draftProcessingSettings.language)}
+                  </span>
+                </span>
+                <span className="shrink-0 text-xs font-semibold text-blue-700">Edit</span>
+              </span>
+              <span className="flex min-w-0 items-center gap-2 rounded-md bg-white px-2.5 py-2 text-xs text-slate-600 ring-1 ring-slate-200">
+                <MessageSquareText className="size-3.5 shrink-0 text-slate-500" />
+                <span className="truncate">
+                  {promptSummary ? `Prompt: ${promptSummary}` : "No prompt terms for this session."}
+                </span>
+              </span>
+            </button>
+          </div>
+
+          <div className="mt-auto flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center">
+            <Button
+              type="submit"
+              size="lg"
+              className="h-12 flex-1 justify-center rounded-lg bg-blue-600 px-4 text-base font-semibold text-white shadow-sm shadow-blue-900/15 hover:bg-blue-700 focus-visible:border-blue-500 focus-visible:ring-blue-500/25"
+            >
+              <Play className="size-5" />
+              {isStarting ? "Starting..." : "Start recording"}
+            </Button>
+
+            {activeSession ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="lg"
+                className="h-12 justify-center px-4"
+                onClick={() => navigate(`/recording/${activeSession.id}`)}
+              >
+                <ArrowUpRight className="size-4" />
+                Reopen active
+              </Button>
+            ) : null}
+          </div>
         </form>
 
         <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
@@ -361,6 +681,17 @@ export function SessionListPage() {
           </div>
         </div>
       </div>
+
+      <TranscriptionSettingsDialog
+        open={isSettingsDialogOpen}
+        settings={settingsDialogDraft}
+        languageSelection={settingsDialogLanguageSelection}
+        models={models}
+        onSettingsChange={setSettingsDialogDraft}
+        onLanguageSelectionChange={handleSettingsDialogLanguageSelectionChange}
+        onCancel={() => setIsSettingsDialogOpen(false)}
+        onConfirm={saveTranscriptionSettingsDraft}
+      />
 
       {error ? (
         <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

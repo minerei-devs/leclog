@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
-import { Trash2 } from "lucide-react";
+import { Check, Pencil, Trash2, X } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useRecentState } from "../hooks/useRecentState";
 import { useSessionPolling } from "../hooks/useSessionPolling";
 import { getErrorMessage } from "../lib/errors";
 import { formatDate, formatDuration } from "../lib/format";
 import { getCaptureSourceLabel } from "../lib/session";
-import { deleteSession, getSession, polishSessionTranscript } from "../lib/tauri";
+import { deleteSession, getSession, polishSessionTranscript, updateSessionTitle } from "../lib/tauri";
 import type { LectureSession } from "../types/session";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SessionArtifacts } from "./SessionArtifacts";
 import { SessionAudioReviewBar, type AudioSeekRequest } from "./SessionAudioReviewBar";
@@ -26,11 +27,15 @@ export function SessionDetailPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isPolishing, setIsPolishing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [isSavingTitle, setIsSavingTitle] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<SessionDetailTab>("content");
   const [activeTimeMs, setActiveTimeMs] = useState<number | null>(null);
   const [seekRequest, setSeekRequest] = useState<AudioSeekRequest | null>(null);
   const [followPlayback, setFollowPlayback] = useState(true);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleError, setTitleError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -39,7 +44,16 @@ export function SessionDetailPage() {
     setActiveTimeMs(null);
     setSeekRequest(null);
     setFollowPlayback(true);
+    setIsEditingTitle(false);
+    setTitleError(null);
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!isEditingTitle) {
+      setTitleDraft(session?.title ?? "");
+      setTitleError(null);
+    }
+  }, [isEditingTitle, session?.id, session?.title]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -152,6 +166,39 @@ export function SessionDetailPage() {
     }
   }
 
+  async function handleSaveTitle() {
+    if (!session) {
+      return;
+    }
+
+    const nextTitle = titleDraft.trim();
+    if (!nextTitle) {
+      setTitleError("Session title cannot be empty.");
+      return;
+    }
+
+    if (nextTitle === session.title) {
+      setTitleDraft(session.title);
+      setTitleError(null);
+      setIsEditingTitle(false);
+      return;
+    }
+
+    setTitleError(null);
+    setIsSavingTitle(true);
+    try {
+      const updated = await updateSessionTitle(session.id, nextTitle);
+      setSession(updated);
+      setTitleDraft(updated.title);
+      setIsEditingTitle(false);
+      window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
+    } catch (reason) {
+      setTitleError(getErrorMessage(reason, "Failed to update the session title."));
+    } finally {
+      setIsSavingTitle(false);
+    }
+  }
+
   const sourceLabel = getCaptureSourceLabel(session.captureSource);
   const canDeleteSession = session.status !== "recording";
   const hasReviewAudio = Boolean(
@@ -203,9 +250,89 @@ export function SessionDetailPage() {
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="eyebrow">Session detail</p>
-            <h2 className="mt-1 truncate text-lg font-semibold tracking-tight text-slate-950">
-              {session.title}
-            </h2>
+            <div className="mt-1 flex min-w-0 items-start gap-1.5">
+              <div className="min-w-0 flex-1">
+                {isEditingTitle ? (
+                  <>
+                    <Input
+                      value={titleDraft}
+                      className="h-9 rounded-lg border-slate-300 bg-white text-lg font-semibold tracking-tight text-slate-950"
+                      aria-label="Session title"
+                      disabled={isSavingTitle}
+                      autoFocus
+                      onFocus={(event) => event.currentTarget.select()}
+                      onChange={(event) => {
+                        setTitleDraft(event.target.value);
+                        setTitleError(null);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void handleSaveTitle();
+                        }
+                        if (event.key === "Escape") {
+                          setTitleDraft(session.title);
+                          setTitleError(null);
+                          setIsEditingTitle(false);
+                        }
+                      }}
+                    />
+                    {titleError ? (
+                      <p className="mt-1 text-xs text-red-600">{titleError}</p>
+                    ) : null}
+                  </>
+                ) : (
+                  <h2 className="truncate text-lg font-semibold tracking-tight text-slate-950">
+                    {session.title}
+                  </h2>
+                )}
+              </div>
+              {isEditingTitle ? (
+                <div className="flex shrink-0 items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label="Save title"
+                    title="Save title"
+                    disabled={isSavingTitle}
+                    onClick={() => void handleSaveTitle()}
+                  >
+                    <Check className="size-3.5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Cancel title edit"
+                    title="Cancel title edit"
+                    disabled={isSavingTitle}
+                    onClick={() => {
+                      setTitleDraft(session.title);
+                      setTitleError(null);
+                      setIsEditingTitle(false);
+                    }}
+                  >
+                    <X className="size-3.5" />
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Edit title"
+                  title="Edit title"
+                  onClick={() => {
+                    setTitleDraft(session.title);
+                    setTitleError(null);
+                    setIsEditingTitle(true);
+                  }}
+                >
+                  <Pencil className="size-3.5" />
+                </Button>
+              )}
+            </div>
             <p className="mt-1 truncate text-xs text-slate-500" title={`${sourceLabel} · ${formatDuration(session.durationMs)} · ${session.transcriptPhase}`}>
               {sourceLabel} · {formatDuration(session.durationMs)} · {session.transcriptPhase}
             </p>

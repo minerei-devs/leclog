@@ -21,7 +21,7 @@ import {
   cancelBackgroundTask,
   downloadTranscriptionModel,
   listBackgroundTasks,
-  listSessions,
+  listSessionSummaries,
   revealResource,
   retrySessionProcessing,
 } from "@/lib/tauri";
@@ -33,7 +33,7 @@ import {
   summarizeTaskError,
   taskFailureMeta,
 } from "@/lib/tasks";
-import type { BackgroundTask, LectureSession } from "@/types/session";
+import type { BackgroundTask, SessionSummary } from "@/types/session";
 import { useAppSettings } from "@/hooks/useAppSettings";
 import { useSessionPolling } from "@/hooks/useSessionPolling";
 import { Badge } from "@/components/ui/badge";
@@ -43,7 +43,7 @@ import { Separator } from "@/components/ui/separator";
 import { SettingsPage } from "./SettingsPage";
 import type { SettingsPanelId } from "./SettingsPage";
 
-function sessionBadgeClass(session: LectureSession) {
+function sessionBadgeClass(session: Pick<SessionSummary, "status" | "transcriptPhase">) {
   if (session.status === "recording") {
     return "border-red-200 bg-red-50 text-red-700";
   }
@@ -63,7 +63,7 @@ function sessionBadgeClass(session: LectureSession) {
   return "border-slate-200 bg-slate-100 text-slate-600";
 }
 
-function sessionDotClass(session: LectureSession) {
+function sessionDotClass(session: Pick<SessionSummary, "status" | "transcriptPhase">) {
   if (session.status === "recording") {
     return "bg-red-500";
   }
@@ -180,7 +180,7 @@ export function AppShell({ children }: PropsWithChildren) {
   const location = useLocation();
   const navigate = useNavigate();
   const { settings: appSettings, isLoaded: appSettingsLoaded } = useAppSettings();
-  const [sessions, setSessions] = useState<LectureSession[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialPanel, setSettingsInitialPanel] = useState<SettingsPanelId>("overview");
@@ -197,7 +197,7 @@ export function AppShell({ children }: PropsWithChildren) {
   );
 
   const refreshShellData = useCallback(async () => {
-    const [result, nextTasks] = await Promise.all([listSessions(), listBackgroundTasks()]);
+    const [result, nextTasks] = await Promise.all([listSessionSummaries(), listBackgroundTasks()]);
     setSessions(result);
     setTasks(nextTasks);
   }, []);
@@ -205,7 +205,7 @@ export function AppShell({ children }: PropsWithChildren) {
   useEffect(() => {
     let isMounted = true;
 
-    void Promise.all([listSessions(), listBackgroundTasks()])
+    void Promise.all([listSessionSummaries(), listBackgroundTasks()])
       .then(([result, nextTasks]) => {
         if (isMounted) {
           setSessions(result);
@@ -233,7 +233,7 @@ export function AppShell({ children }: PropsWithChildren) {
   useSessionPolling({
     enabled: hasActiveProcessing,
     intervalMs: 1500,
-    onSessions: setSessions,
+    onSessionSummaries: setSessions,
   });
 
   useEffect(() => {
@@ -666,7 +666,7 @@ export function AppShell({ children }: PropsWithChildren) {
                         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
                           <Waves className="size-3.5 shrink-0" />
                           <span className="block max-w-full truncate">
-                            {session.segments.length} segments · {session.transcriptPhase}
+                            {session.segmentCount} segments · {session.transcriptPhase}
                           </span>
                         </div>
                         <span className="shrink-0 text-[10px] tabular-nums text-slate-400">

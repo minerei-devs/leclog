@@ -48,6 +48,7 @@ export function RecordingPage() {
   const handleError = useCallback((message: string) => {
     setError(message);
   }, []);
+  const activeProcessingSettings = session?.processingSettings ?? processingSettings;
 
   const { isCapturingAudio, audioStatusLabel, audioLevel, stopSegment } = useSessionAudioRecorder({
     session,
@@ -57,7 +58,7 @@ export function RecordingPage() {
   const liveDurationMs = useLiveSessionDuration(session);
   useLiveTranscript({
     session,
-    settings: processingSettings,
+    settings: activeProcessingSettings,
     onSessionUpdate: handleSessionUpdate,
     onError: handleError,
   });
@@ -189,7 +190,7 @@ export function RecordingPage() {
       await stopSegment();
       const processing = await stopSessionRecording(session.id);
       setSession(processing);
-      await saveSessionWithProcessingSettings(session.id, processingSettings);
+      await saveSessionWithProcessingSettings(session.id, activeProcessingSettings);
       await updateRecentState({
         activeSessionId: null,
         draftCaptureSource: processing.captureSource,
