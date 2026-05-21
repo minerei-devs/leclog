@@ -18,6 +18,10 @@ export function useLiveTranscript({
   const isRefreshingRef = useRef(false);
   const sessionRef = useRef<LectureSession | null>(session);
   const settingsRef = useRef(settings);
+  const liveRefreshIntervalSeconds = Math.max(
+    10,
+    Math.min(60, Number(settings.liveRefreshIntervalSeconds ?? 20)),
+  );
 
   useEffect(() => {
     if (!session || session.status !== "paused" || isRefreshingRef.current) {
@@ -75,10 +79,10 @@ export function useLiveTranscript({
       } finally {
         isRefreshingRef.current = false;
       }
-    }, 4_000);
+    }, liveRefreshIntervalSeconds * 1_000);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [onError, onSessionUpdate, session?.id, session?.status]);
+  }, [liveRefreshIntervalSeconds, onError, onSessionUpdate, session?.id, session?.status]);
 }

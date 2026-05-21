@@ -1019,8 +1019,8 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
                     <input
                       className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
                       type="number"
-                      min={2}
-                      max={30}
+                      min={10}
+                      max={60}
                       value={processingSettings.liveRefreshIntervalSeconds}
                       onChange={(event) =>
                         void updateSettings({

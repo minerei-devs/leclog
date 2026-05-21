@@ -123,6 +123,7 @@ pub struct SessionSummary {
     pub audio_level: Option<f32>,
     pub capture_target_label: Option<String>,
     pub segment_count: usize,
+    pub storage_bytes: u64,
 }
 
 impl LectureSession {
@@ -232,7 +233,7 @@ impl Default for ProcessingSettings {
             chunk_overlap_seconds: 20,
             whisper_threads: None,
             max_parallel_chunks: 1,
-            live_refresh_interval_seconds: 4,
+            live_refresh_interval_seconds: 20,
         }
     }
 }

@@ -1,12 +1,15 @@
-use std::path::Path;
+use std::path::PathBuf;
 #[cfg(target_os = "macos")]
-use std::sync::mpsc;
+use std::{
+    sync::{mpsc, Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use crate::models::{CaptureSource, LectureSession};
 #[cfg(target_os = "macos")]
-use crate::storage;
-#[cfg(target_os = "macos")]
 use crate::state::AudioMeterState;
+#[cfg(target_os = "macos")]
+use crate::storage;
 #[cfg(target_os = "macos")]
 use tauri::{AppHandle, Manager};
 
@@ -14,12 +17,8 @@ use tauri::{AppHandle, Manager};
 use screencapturekit::{
     cm::CMSampleBuffer,
     content_sharing_picker::{
-        SCContentSharingPicker, SCContentSharingPickerConfiguration,
-        SCContentSharingPickerMode, SCPickedSource, SCPickerOutcome,
-    },
-    recording_output::{
-        SCRecordingOutput, SCRecordingOutputCodec, SCRecordingOutputConfiguration,
-        SCRecordingOutputFileType,
+        SCContentSharingPicker, SCContentSharingPickerConfiguration, SCContentSharingPickerMode,
+        SCPickedSource, SCPickerOutcome,
     },
     stream::{
         configuration::{
@@ -42,7 +41,7 @@ pub struct StartedSystemAudioCapture {
 #[cfg(target_os = "macos")]
 pub struct SystemAudioCapture {
     stream: SCStream,
-    recording: SCRecordingOutput,
+    writer: Arc<Mutex<BufferedSystemAudioWriter>>,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -83,7 +82,9 @@ impl SystemAudioCapture {
         let result = match outcome {
             SCPickerOutcome::Picked(result) => result,
             SCPickerOutcome::Cancelled => {
-                return Err(String::from("System audio capture selection was cancelled."));
+                return Err(String::from(
+                    "System audio capture selection was cancelled.",
+                ));
             }
             SCPickerOutcome::Error(error) => {
                 return Err(format!(
@@ -92,70 +93,65 @@ impl SystemAudioCapture {
             }
         };
 
-        let (width, height) = result.pixel_size();
         let target_label = describe_picker_source(&result.source(), result.filter().style());
         let filter = result.filter();
         let stream_config = SCStreamConfiguration::new()
-            .with_width(width.max(1))
-            .with_height(height.max(1))
+            .with_width(2)
+            .with_height(2)
             .with_captures_audio(true)
             .with_captures_microphone(false)
             .with_sample_rate(AudioSampleRate::Rate48000)
             .with_channel_count(AudioChannelCount::Stereo)
             .with_excludes_current_process_audio(true);
 
-        let recording_config = SCRecordingOutputConfiguration::new()
-            .with_output_url(Path::new(output_path))
-            .with_output_file_type(SCRecordingOutputFileType::MP4)
-            .with_video_codec(SCRecordingOutputCodec::H264);
-        let recording = SCRecordingOutput::new(&recording_config).ok_or_else(|| {
-            String::from("Failed to create the macOS recording output for system audio capture.")
-        })?;
-
         let preview_path = session.live_preview_audio_path.clone();
         let preview_sample_rate = session.live_preview_sample_rate.unwrap_or(48_000);
         let app_handle = app.clone();
         let meter_session_id = session.id.clone();
+        let writer = Arc::new(Mutex::new(BufferedSystemAudioWriter::new(
+            PathBuf::from(output_path),
+            preview_path.map(PathBuf::from),
+            preview_sample_rate,
+        )));
+        let writer_for_handler = writer.clone();
 
         let mut stream = SCStream::new(&filter, &stream_config);
-        if let Some(preview_path) = preview_path {
-            let handler_id = stream.add_output_handler(
-                move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
-                    if of_type != SCStreamOutputType::Audio {
-                        return;
-                    }
+        let handler_id = stream.add_output_handler(
+            move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
+                if of_type != SCStreamOutputType::Audio {
+                    return;
+                }
 
-                    let Some(chunk) = sample_buffer_to_pcm16_mono(&sample) else {
-                        return;
-                    };
+                let Some(chunk) = sample_buffer_to_pcm16_mono(&sample) else {
+                    return;
+                };
+
+                let mut should_update_meter = false;
+                if let Ok(mut writer) = writer_for_handler.lock() {
+                    should_update_meter = writer.push(&chunk).unwrap_or(false);
+                }
+                if should_update_meter {
                     let _ = app_handle
                         .state::<AudioMeterState>()
                         .set(&meter_session_id, calculate_pcm16_level(&chunk));
-                    let _ = storage::append_live_preview_chunk_to_path(
-                        Path::new(&preview_path),
-                        preview_sample_rate,
-                        &chunk,
-                    );
-                },
-                SCStreamOutputType::Audio,
-            );
-            if handler_id.is_none() {
-                return Err(String::from(
-                    "Failed to attach the macOS system audio sample handler.",
-                ));
-            }
+                }
+            },
+            SCStreamOutputType::Audio,
+        );
+        if handler_id.is_none() {
+            return Err(String::from(
+                "Failed to attach the macOS system audio sample handler.",
+            ));
         }
 
-        stream
-            .add_recording_output(&recording)
-            .map_err(|error| format!("Failed to attach the recording output: {error}"))?;
         if let Err(error) = stream.start_capture() {
-            let _ = stream.remove_recording_output(&recording);
-            return Err(format!("Failed to start macOS system audio capture: {error}"));
+            return Err(format!(
+                "Failed to start macOS system audio capture: {error}"
+            ));
         }
 
         Ok(StartedSystemAudioCapture {
-            capture: Self { stream, recording },
+            capture: Self { stream, writer },
             target_label,
         })
     }
@@ -164,16 +160,90 @@ impl SystemAudioCapture {
         self.stream
             .stop_capture()
             .map_err(|error| format!("Failed to stop macOS system audio capture: {error}"))?;
-        self.stream
-            .remove_recording_output(&self.recording)
-            .map_err(|error| format!("Failed to finalize the macOS recording output: {error}"))?;
+        self.writer
+            .lock()
+            .map_err(|_| String::from("Failed to acquire the system audio writer lock."))?
+            .flush()
+            .map_err(|error| {
+                format!("Failed to finalize the system audio capture file: {error}")
+            })?;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct BufferedSystemAudioWriter {
+    output_path: PathBuf,
+    preview_path: Option<PathBuf>,
+    sample_rate: u32,
+    pending: Vec<u8>,
+    last_flush_at: Instant,
+    last_meter_at: Instant,
+}
+
+#[cfg(target_os = "macos")]
+impl BufferedSystemAudioWriter {
+    fn new(output_path: PathBuf, preview_path: Option<PathBuf>, sample_rate: u32) -> Self {
+        let now = Instant::now();
+        Self {
+            output_path,
+            preview_path,
+            sample_rate,
+            pending: Vec::with_capacity(256 * 1024),
+            last_flush_at: now,
+            last_meter_at: now.checked_sub(Duration::from_secs(1)).unwrap_or(now),
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> anyhow::Result<bool> {
+        self.pending.extend_from_slice(chunk);
+        let now = Instant::now();
+        let should_update_meter =
+            now.duration_since(self.last_meter_at) >= Duration::from_millis(100);
+        if should_update_meter {
+            self.last_meter_at = now;
+        }
+
+        if self.pending.len() >= 256 * 1024
+            || now.duration_since(self.last_flush_at) >= Duration::from_secs(1)
+        {
+            self.flush()?;
+        }
+
+        Ok(should_update_meter)
+    }
+
+    fn flush(&mut self) -> anyhow::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+
+        storage::append_live_preview_chunk_to_path(
+            &self.output_path,
+            self.sample_rate,
+            &self.pending,
+        )?;
+        if let Some(preview_path) = &self.preview_path {
+            if preview_path != &self.output_path {
+                storage::append_live_preview_chunk_to_path(
+                    preview_path,
+                    self.sample_rate,
+                    &self.pending,
+                )?;
+            }
+        }
+        self.pending.clear();
+        self.last_flush_at = Instant::now();
         Ok(())
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 impl SystemAudioCapture {
-    pub async fn start(_session: &LectureSession) -> Result<StartedSystemAudioCapture, String> {
+    pub async fn start(
+        _app: &tauri::AppHandle,
+        _session: &LectureSession,
+    ) -> Result<StartedSystemAudioCapture, String> {
         Err(String::from(
             "System audio capture is only available on macOS in this build.",
         ))
@@ -185,10 +255,7 @@ impl SystemAudioCapture {
 }
 
 #[cfg(target_os = "macos")]
-fn describe_picker_source(
-    source: &SCPickedSource,
-    style: SCShareableContentStyle,
-) -> String {
+fn describe_picker_source(source: &SCPickedSource, style: SCShareableContentStyle) -> String {
     match source {
         SCPickedSource::Window(title) => format!("Window: {title}"),
         SCPickedSource::Display(id) => format!("Display {id}"),

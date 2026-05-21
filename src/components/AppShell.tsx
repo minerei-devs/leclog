@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { check } from "@tauri-apps/plugin-updater";
-import { formatDuration } from "@/lib/format";
+import { formatBytes, formatDuration } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import {
   cancelBackgroundTask,
@@ -87,6 +87,16 @@ function formatSidebarTime(date: string) {
     minute: "2-digit",
     hour12: false,
   }).format(new Date(date));
+}
+
+const LARGE_SESSION_BYTES = 1024 ** 3;
+
+function sessionStorageBadgeClass(storageBytes: number) {
+  if (storageBytes >= LARGE_SESSION_BYTES) {
+    return "border-red-200 bg-red-50 text-red-700";
+  }
+
+  return "border-slate-200 bg-slate-50 text-slate-500";
 }
 
 function isVisibleSessionTask(task: BackgroundTask) {
@@ -560,6 +570,9 @@ export function AppShell({ children }: PropsWithChildren) {
                     location.pathname === href ||
                     location.pathname.endsWith(`/session/${session.id}`) ||
                     location.pathname.endsWith(`/recording/${session.id}`);
+                  const storageLabel = formatBytes(session.storageBytes);
+                  const hasLargeStorage = session.storageBytes >= LARGE_SESSION_BYTES;
+                  const sessionTitle = `${session.title} · ${getCaptureSourceLabel(session.captureSource)} · ${storageLabel} · ${session.transcriptPhase}`;
 
                   if (isSidebarCollapsed) {
                     return (
@@ -570,7 +583,7 @@ export function AppShell({ children }: PropsWithChildren) {
                           "relative mx-auto flex size-10 items-center justify-center rounded-xl border border-transparent text-slate-500 transition-colors hover:border-slate-200 hover:bg-slate-50",
                           isActive && "border-slate-200 bg-white text-slate-950 shadow-sm",
                         )}
-                        title={`${session.title} · ${getCaptureSourceLabel(session.captureSource)} · ${session.transcriptPhase}`}
+                        title={sessionTitle}
                       >
                         <Waves className="size-4" />
                         <span
@@ -599,7 +612,7 @@ export function AppShell({ children }: PropsWithChildren) {
                         "block w-full max-w-full overflow-hidden rounded-lg border border-transparent bg-transparent px-2 py-2 transition-colors hover:border-slate-200 hover:bg-slate-50/80",
                         isActive && "border-slate-200 bg-white shadow-sm",
                       )}
-                      title={`${session.title} · ${getCaptureSourceLabel(session.captureSource)} · ${session.transcriptPhase}`}
+                      title={sessionTitle}
                     >
                       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
                         <div className="min-w-0 overflow-hidden">
@@ -607,19 +620,32 @@ export function AppShell({ children }: PropsWithChildren) {
                             {session.title}
                           </p>
                         </div>
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            "shrink-0 rounded-full px-2 py-0.5 text-[11px] capitalize",
-                            sessionBadgeClass(session),
-                          )}
-                        >
-                          {session.status}
-                        </Badge>
+                        <div className="flex shrink-0 items-center gap-1">
+                          {hasLargeStorage ? (
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "rounded-full px-2 py-0.5 text-[11px]",
+                                sessionStorageBadgeClass(session.storageBytes),
+                              )}
+                            >
+                              {storageLabel}
+                            </Badge>
+                          ) : null}
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "rounded-full px-2 py-0.5 text-[11px] capitalize",
+                              sessionBadgeClass(session),
+                            )}
+                          >
+                            {session.status}
+                          </Badge>
+                        </div>
                       </div>
 
                       <p className="mt-1.5 block max-w-full truncate text-[11px] text-slate-500">
-                        {getCaptureSourceLabel(session.captureSource)} ({formatDuration(session.durationMs)})
+                        {getCaptureSourceLabel(session.captureSource)} ({formatDuration(session.durationMs)}) · {storageLabel}
                       </p>
 
                       {task ? (

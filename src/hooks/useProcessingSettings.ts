@@ -11,7 +11,7 @@ const fallbackProcessingSettings: ProcessingSettings = {
   chunkOverlapSeconds: 20,
   whisperThreads: null,
   maxParallelChunks: 1,
-  liveRefreshIntervalSeconds: 4,
+  liveRefreshIntervalSeconds: 20,
 };
 
 export function useProcessingSettings() {

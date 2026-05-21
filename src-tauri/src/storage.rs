@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     fs::OpenOptions,
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -35,6 +34,7 @@ const POLISHED_TRANSCRIPT_FILE_NAME: &str = "transcript-polished.txt";
 const TRANSCRIPT_JSON_FILE_NAME: &str = "transcript.json";
 const LIVE_PREVIEW_AUDIO_FILE_NAME: &str = "live-preview.wav";
 const LIVE_TRANSCRIPT_JSON_FILE_NAME: &str = "live-transcript.json";
+const LIVE_TRANSCRIPT_WINDOW_AUDIO_FILE_NAME: &str = "live-transcript-window.wav";
 const CHUNKS_DIR_NAME: &str = "chunks";
 const TASK_FAILURES_DIR_NAME: &str = "task-failures";
 const TASK_LOGS_DIR_NAME: &str = "logs/tasks";
@@ -42,6 +42,9 @@ const TASK_FAILURE_LOG_FILE_NAME: &str = "latest.json";
 const TASK_STDERR_FILE_NAME: &str = "latest.stderr.log";
 const TASK_FAILURE_EXCERPT_BYTES: usize = 4 * 1024;
 const WAV_HEADER_LEN: u64 = 44;
+const LIVE_TRANSCRIPT_WINDOW_MS: u64 = 120_000;
+const LIVE_TRANSCRIPT_REFRESH_GRACE_MS: u64 = 2_000;
+const LIVE_TRANSCRIPT_WINDOW_SAMPLE_RATE: u32 = 16_000;
 const DEFAULT_WHISPER_MODEL_FILE_NAMES: [&str; 8] = [
     "ggml-large-v3-turbo.bin",
     "ggml-small.bin",
@@ -57,8 +60,18 @@ const MODEL_REPOSITORY_BASE_URL: &str = "https://huggingface.co/ggerganov/whispe
 const MANAGED_MODEL_CATALOG: [(&str, &str, u64, bool); 4] = [
     ("ggml-base.bin", "Base", 142 * 1024 * 1024, false),
     ("ggml-small.bin", "Small", 466 * 1024 * 1024, true),
-    ("ggml-large-v3-turbo-q5_0.bin", "Large v3 Turbo q5_0", 547 * 1024 * 1024, false),
-    ("ggml-large-v3-turbo.bin", "Large v3 Turbo", 1550 * 1024 * 1024, false),
+    (
+        "ggml-large-v3-turbo-q5_0.bin",
+        "Large v3 Turbo q5_0",
+        547 * 1024 * 1024,
+        false,
+    ),
+    (
+        "ggml-large-v3-turbo.bin",
+        "Large v3 Turbo",
+        1550 * 1024 * 1024,
+        false,
+    ),
 ];
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -69,9 +82,20 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn write_text_if_changed(path: &Path, payload: &str, context: &str) -> Result<()> {
+    if fs::read_to_string(path)
+        .map(|current| current == payload)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    fs::write(path, payload).with_context(|| context.to_string())?;
+    Ok(())
+}
+
 pub fn app_data_dir(app: &AppHandle) -> Result<PathBuf> {
-    app
-        .path()
+    app.path()
         .app_local_data_dir()
         .context("Failed to resolve the local app data directory.")
 }
@@ -138,17 +162,16 @@ fn read_tail_excerpt(path: &Path) -> Result<Option<String>> {
     }
 
     let start = bytes.len().saturating_sub(TASK_FAILURE_EXCERPT_BYTES);
-    let excerpt = String::from_utf8_lossy(&bytes[start..])
-        .trim()
-        .to_string();
+    let excerpt = String::from_utf8_lossy(&bytes[start..]).trim().to_string();
     Ok((!excerpt.is_empty()).then_some(excerpt))
 }
 
 pub fn clear_task_failure_log(app: &AppHandle, task_id: &str) -> Result<()> {
     let log_dir = task_log_dir(app, task_id)?;
     if log_dir.exists() {
-        fs::remove_dir_all(&log_dir)
-            .with_context(|| format!("Failed to remove task log directory {}.", log_dir.display()))?;
+        fs::remove_dir_all(&log_dir).with_context(|| {
+            format!("Failed to remove task log directory {}.", log_dir.display())
+        })?;
     }
     Ok(())
 }
@@ -194,7 +217,12 @@ pub fn write_task_command_failure_log(
         .map(read_tail_excerpt)
         .transpose()?
         .flatten()
-        .or_else(|| fallback_stderr.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string));
+        .or_else(|| {
+            fallback_stderr
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
     let log = TaskFailureLog {
         occurred_at: chrono::Utc::now().to_rfc3339(),
         command_label: Some(command_label.to_string()),
@@ -204,17 +232,14 @@ pub fn write_task_command_failure_log(
         log_path: Some(log_path.display().to_string()),
         stderr_path: stderr_path.map(|path| path.display().to_string()),
     };
-    let raw = serde_json::to_string_pretty(&log).context("Failed to serialize task failure log.")?;
+    let raw =
+        serde_json::to_string_pretty(&log).context("Failed to serialize task failure log.")?;
     fs::write(&log_path, raw)
         .with_context(|| format!("Failed to write task failure log {}.", log_path.display()))?;
     Ok(log)
 }
 
-pub fn write_task_error_log(
-    app: &AppHandle,
-    task_id: &str,
-    error: &str,
-) -> Result<TaskFailureLog> {
+pub fn write_task_error_log(app: &AppHandle, task_id: &str, error: &str) -> Result<TaskFailureLog> {
     let log_path = task_failure_log_path(app, task_id)?;
     ensure_parent_dir(&log_path)?;
     let log = TaskFailureLog {
@@ -226,7 +251,8 @@ pub fn write_task_error_log(
         log_path: Some(log_path.display().to_string()),
         stderr_path: None,
     };
-    let raw = serde_json::to_string_pretty(&log).context("Failed to serialize task failure log.")?;
+    let raw =
+        serde_json::to_string_pretty(&log).context("Failed to serialize task failure log.")?;
     fs::write(&log_path, raw)
         .with_context(|| format!("Failed to write task failure log {}.", log_path.display()))?;
     Ok(log)
@@ -261,9 +287,12 @@ pub fn list_persisted_failed_tasks(app: &AppHandle) -> Result<Vec<BackgroundTask
     }
 
     let mut tasks = Vec::new();
-    for entry in fs::read_dir(&failures_dir)
-        .with_context(|| format!("Failed to read task failures directory {}.", failures_dir.display()))?
-    {
+    for entry in fs::read_dir(&failures_dir).with_context(|| {
+        format!(
+            "Failed to read task failures directory {}.",
+            failures_dir.display()
+        )
+    })? {
         let entry = entry.context("Failed to read task failure entry.")?;
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
@@ -293,8 +322,8 @@ pub fn load_processing_settings(app: &AppHandle) -> Result<ProcessingSettings> {
         return Ok(ProcessingSettings::default());
     }
 
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}.", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}.", path.display()))?;
     let settings = serde_json::from_str::<ProcessingSettings>(&raw).unwrap_or_default();
     Ok(normalize_processing_settings(settings))
 }
@@ -304,7 +333,7 @@ pub fn persist_processing_settings(app: &AppHandle, settings: &ProcessingSetting
     ensure_parent_dir(&path)?;
     let payload = serde_json::to_string_pretty(&normalize_processing_settings(settings.clone()))
         .context("Failed to serialize processing settings.")?;
-    fs::write(path, payload).context("Failed to write processing settings.")?;
+    write_text_if_changed(&path, &payload, "Failed to write processing settings.")?;
     Ok(())
 }
 
@@ -341,8 +370,11 @@ pub fn normalize_processing_settings(mut settings: ProcessingSettings) -> Proces
     settings.chunk_duration_minutes = settings.chunk_duration_minutes.clamp(1, 60);
     settings.chunk_overlap_seconds = settings.chunk_overlap_seconds.min(120);
     settings.max_parallel_chunks = settings.max_parallel_chunks.clamp(1, 4);
-    settings.live_refresh_interval_seconds = settings.live_refresh_interval_seconds.clamp(2, 30);
-    settings.whisper_threads = settings.whisper_threads.filter(|value| *value > 0).map(|value| value.min(16));
+    settings.live_refresh_interval_seconds = settings.live_refresh_interval_seconds.clamp(10, 60);
+    settings.whisper_threads = settings
+        .whisper_threads
+        .filter(|value| *value > 0)
+        .map(|value| value.min(16));
 
     settings
 }
@@ -411,7 +443,11 @@ fn transcript_json_path(app: &AppHandle, session_id: &str) -> Result<PathBuf> {
         .join(TRANSCRIPT_JSON_FILE_NAME))
 }
 
-fn chunk_transcript_json_path(app: &AppHandle, session_id: &str, chunk_index: usize) -> Result<PathBuf> {
+fn chunk_transcript_json_path(
+    app: &AppHandle,
+    session_id: &str,
+    chunk_index: usize,
+) -> Result<PathBuf> {
     Ok(session_dir_path(app, session_id)?
         .join("processed")
         .join(CHUNKS_DIR_NAME)
@@ -422,6 +458,12 @@ fn live_transcript_json_path(app: &AppHandle, session_id: &str) -> Result<PathBu
     Ok(session_dir_path(app, session_id)?
         .join("processed")
         .join(LIVE_TRANSCRIPT_JSON_FILE_NAME))
+}
+
+fn live_transcript_window_audio_path(app: &AppHandle, session_id: &str) -> Result<PathBuf> {
+    Ok(session_dir_path(app, session_id)?
+        .join("processed")
+        .join(LIVE_TRANSCRIPT_WINDOW_AUDIO_FILE_NAME))
 }
 
 fn concat_inputs_path(app: &AppHandle, session_id: &str) -> Result<PathBuf> {
@@ -603,7 +645,10 @@ pub fn resolve_whisper_cli_path(app: &AppHandle) -> PathBuf {
     PathBuf::from("whisper-cli")
 }
 
-fn resolve_whisper_model_path(app: &AppHandle, preferred_model_id: Option<&str>) -> Option<PathBuf> {
+fn resolve_whisper_model_path(
+    app: &AppHandle,
+    preferred_model_id: Option<&str>,
+) -> Option<PathBuf> {
     if let Ok(path) = env::var("LECLOG_WHISPER_MODEL_PATH") {
         let candidate = PathBuf::from(path);
         if candidate.exists() {
@@ -653,20 +698,22 @@ fn model_search_dirs(app: &AppHandle) -> Vec<PathBuf> {
 fn model_catalog() -> Vec<ManagedTranscriptionModel> {
     MANAGED_MODEL_CATALOG
         .iter()
-        .map(|(id, label, size_bytes, recommended)| ManagedTranscriptionModel {
-            id: (*id).to_string(),
-            label: (*label).to_string(),
-            source_url: format!("{MODEL_REPOSITORY_BASE_URL}/{id}?download=true"),
-            size_bytes: *size_bytes,
-            recommended: *recommended,
-            installed: false,
-            installed_path: None,
-            download_status: ModelDownloadStatus::Idle,
-            downloaded_bytes: 0,
-            total_bytes: Some(*size_bytes),
-            error: None,
-            managed_by_app: false,
-        })
+        .map(
+            |(id, label, size_bytes, recommended)| ManagedTranscriptionModel {
+                id: (*id).to_string(),
+                label: (*label).to_string(),
+                source_url: format!("{MODEL_REPOSITORY_BASE_URL}/{id}?download=true"),
+                size_bytes: *size_bytes,
+                recommended: *recommended,
+                installed: false,
+                installed_path: None,
+                download_status: ModelDownloadStatus::Idle,
+                downloaded_bytes: 0,
+                total_bytes: Some(*size_bytes),
+                error: None,
+                managed_by_app: false,
+            },
+        )
         .collect()
 }
 
@@ -704,12 +751,24 @@ fn resolve_preferred_model_for_settings(
     }
 
     match settings.quality_preset {
-        ProcessingQualityPreset::Fast => {
-            first_existing_model_id(app, &["ggml-base.bin", "ggml-tiny.bin", "ggml-base.en.bin", "ggml-tiny.en.bin"])
-        }
-        ProcessingQualityPreset::Balanced => {
-            first_existing_model_id(app, &["ggml-small.bin", "ggml-base.bin", "ggml-small.en.bin", "ggml-base.en.bin"])
-        }
+        ProcessingQualityPreset::Fast => first_existing_model_id(
+            app,
+            &[
+                "ggml-base.bin",
+                "ggml-tiny.bin",
+                "ggml-base.en.bin",
+                "ggml-tiny.en.bin",
+            ],
+        ),
+        ProcessingQualityPreset::Balanced => first_existing_model_id(
+            app,
+            &[
+                "ggml-small.bin",
+                "ggml-base.bin",
+                "ggml-small.en.bin",
+                "ggml-base.en.bin",
+            ],
+        ),
         ProcessingQualityPreset::Accurate => first_existing_model_id(
             app,
             &[
@@ -745,7 +804,9 @@ pub fn list_available_transcription_models(
             model.installed_path = Some(path.display().to_string());
             model.managed_by_app = path.starts_with(app_models_dir(app).unwrap_or_default());
             model.download_status = ModelDownloadStatus::Completed;
-            model.downloaded_bytes = std::fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(model.size_bytes);
+            model.downloaded_bytes = std::fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(model.size_bytes);
             model.total_bytes = Some(model.downloaded_bytes);
         }
 
@@ -804,7 +865,12 @@ where
         .send()
         .with_context(|| format!("Failed to download {}.", catalog_item.label))?
         .error_for_status()
-        .with_context(|| format!("The model server rejected the download for {}.", catalog_item.label))?;
+        .with_context(|| {
+            format!(
+                "The model server rejected the download for {}.",
+                catalog_item.label
+            )
+        })?;
 
     let total_bytes = response.content_length().or(Some(catalog_item.size_bytes));
     let mut file = fs::File::create(&temp_path)
@@ -822,8 +888,7 @@ where
         file.write_all(&buffer[..read])
             .context("Failed to write model bytes to disk.")?;
         downloaded_bytes = downloaded_bytes.saturating_add(read as u64);
-        on_progress(downloaded_bytes, total_bytes)
-            .map_err(|error| anyhow::anyhow!(error))?;
+        on_progress(downloaded_bytes, total_bytes).map_err(|error| anyhow::anyhow!(error))?;
     }
 
     fs::rename(&temp_path, &destination_path)
@@ -886,12 +951,8 @@ pub fn list_partial_downloads(app: &AppHandle) -> Result<Vec<PathBuf>> {
 
 pub fn is_inside_app_data(app: &AppHandle, path: &Path) -> Result<bool> {
     let app_data = app_data_dir(app)?;
-    let canonical_app_data = app_data
-        .canonicalize()
-        .unwrap_or(app_data);
-    let canonical_path = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let canonical_app_data = app_data.canonicalize().unwrap_or(app_data);
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     Ok(canonical_path.starts_with(canonical_app_data))
 }
 
@@ -929,8 +990,12 @@ fn run_command_with_optional_task(
     clear_task_failure_log(app, task_id).ok();
     let stderr_path = task_stderr_path(app, task_id)?;
     ensure_parent_dir(&stderr_path)?;
-    let stderr_file = fs::File::create(&stderr_path)
-        .with_context(|| format!("Failed to create task stderr log {}.", stderr_path.display()))?;
+    let stderr_file = fs::File::create(&stderr_path).with_context(|| {
+        format!(
+            "Failed to create task stderr log {}.",
+            stderr_path.display()
+        )
+    })?;
     let mut child = Command::new(program_path)
         .args(args)
         .stdin(Stdio::null())
@@ -938,7 +1003,10 @@ fn run_command_with_optional_task(
         .stderr(Stdio::from(stderr_file))
         .spawn()
         .map_err(|error| {
-            let message = format!("Failed to launch {label} at {}: {error}", program_path.display());
+            let message = format!(
+                "Failed to launch {label} at {}: {error}",
+                program_path.display()
+            );
             let _ = write_task_command_failure_log(
                 app,
                 task_id,
@@ -1105,11 +1173,10 @@ fn looks_like_question(value: &str) -> bool {
 }
 
 fn normalize_transcript_text(text: &str) -> String {
-    let mut normalized = collapse_repeated_punctuation(&normalize_punctuation_spacing(
-        &squeeze_whitespace(text),
-    ))
-    .trim()
-    .to_string();
+    let mut normalized =
+        collapse_repeated_punctuation(&normalize_punctuation_spacing(&squeeze_whitespace(text)))
+            .trim()
+            .to_string();
     if normalized.is_empty() {
         return normalized;
     }
@@ -1148,8 +1215,10 @@ fn merge_transcript_text(left: &str, right: &str) -> String {
         return left.to_string();
     }
 
-    let right_starts_with_punctuation =
-        right.starts_with('、') || right.starts_with('。') || right.starts_with('？') || right.starts_with('！');
+    let right_starts_with_punctuation = right.starts_with('、')
+        || right.starts_with('。')
+        || right.starts_with('？')
+        || right.starts_with('！');
     let needs_space = left
         .chars()
         .last()
@@ -1204,7 +1273,10 @@ fn likely_sentence_boundary(text: &str, is_final: bool) -> bool {
         "ますか",
     ];
 
-    (char_len >= 8 && common_japanese_endings.iter().any(|ending| trimmed.ends_with(ending)))
+    (char_len >= 8
+        && common_japanese_endings
+            .iter()
+            .any(|ending| trimmed.ends_with(ending)))
         || char_len >= 28
 }
 
@@ -1422,13 +1494,8 @@ pub fn start_audio_segment(
     Ok(())
 }
 
-pub fn append_audio_chunk(session: &LectureSession, chunk: &[u8]) -> Result<()> {
-    let path = session
-        .active_audio_file_path
-        .as_ref()
-        .map(PathBuf::from)
-        .context("There is no active audio segment for this session.")?;
-    ensure_parent_dir(&path)?;
+pub fn append_audio_chunk_to_path(path: &Path, chunk: &[u8]) -> Result<()> {
+    ensure_parent_dir(path)?;
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -1484,7 +1551,11 @@ fn guess_media_mime_type(path: &Path) -> Option<&'static str> {
     }
 }
 
-pub fn import_media_file(app: &AppHandle, session: &mut LectureSession, source_path: &Path) -> Result<()> {
+pub fn import_media_file(
+    app: &AppHandle,
+    session: &mut LectureSession,
+    source_path: &Path,
+) -> Result<()> {
     if !source_path.exists() || !source_path.is_file() {
         anyhow::bail!("The dropped file does not exist: {}", source_path.display());
     }
@@ -1503,7 +1574,10 @@ pub fn import_media_file(app: &AppHandle, session: &mut LectureSession, source_p
     let sanitized_stem = sanitize_file_stem(stem);
     let destination_path = session_dir_path(app, &session.id)?
         .join("audio")
-        .join(format!("{sanitized_stem}.{}", extension.trim_start_matches('.')));
+        .join(format!(
+            "{sanitized_stem}.{}",
+            extension.trim_start_matches('.')
+        ));
 
     ensure_parent_dir(&destination_path)?;
     fs::copy(source_path, &destination_path).with_context(|| {
@@ -1548,7 +1622,7 @@ fn persist_session_snapshot(app: &AppHandle, session: &LectureSession) -> Result
 
     let payload =
         serde_json::to_string_pretty(session).context("Failed to serialize session metadata.")?;
-    fs::write(path, payload).context("Failed to write session metadata.")?;
+    write_text_if_changed(&path, &payload, "Failed to write session metadata.")?;
     Ok(())
 }
 
@@ -1565,8 +1639,8 @@ pub fn load_sessions(app: &AppHandle) -> Result<Vec<LectureSession>> {
         return Ok(Vec::new());
     }
 
-    let sessions =
-        serde_json::from_str::<Vec<LectureSession>>(&raw).context("Failed to parse sessions.json.")?;
+    let sessions = serde_json::from_str::<Vec<LectureSession>>(&raw)
+        .context("Failed to parse sessions.json.")?;
     Ok(sessions)
 }
 
@@ -1576,7 +1650,7 @@ pub fn persist_sessions(app: &AppHandle, sessions: &[LectureSession]) -> Result<
 
     let payload =
         serde_json::to_string_pretty(sessions).context("Failed to serialize session data.")?;
-    fs::write(path, payload).context("Failed to write session data to disk.")?;
+    write_text_if_changed(&path, &payload, "Failed to write session data to disk.")?;
 
     for session in sessions {
         persist_session_snapshot(app, session)?;
@@ -1597,7 +1671,10 @@ pub fn write_processed_transcript(app: &AppHandle, session: &LectureSession) -> 
     output.push_str(&format!("# {}\n\n", session.title));
     output.push_str(&format!("Status: {:?}\n", session.status));
     output.push_str(&format!("Duration: {} ms\n", session.duration_ms));
-    output.push_str(&format!("Capture files: {}\n", session.audio_file_paths.len()));
+    output.push_str(&format!(
+        "Capture files: {}\n",
+        session.audio_file_paths.len()
+    ));
     if let Some(mime_type) = &session.audio_mime_type {
         output.push_str(&format!("Capture MIME type: {mime_type}\n"));
     }
@@ -1690,12 +1767,19 @@ pub fn list_transcription_models(app: &AppHandle) -> Result<Vec<TranscriptionMod
                     .replace('-', " "),
                 path: path.display().to_string(),
                 size_bytes: metadata.len(),
-                recommended: recommended_path.as_ref().is_some_and(|value| value == &path),
+                recommended: recommended_path
+                    .as_ref()
+                    .is_some_and(|value| value == &path),
             });
         }
     }
 
-    models.sort_by(|left, right| right.recommended.cmp(&left.recommended).then(left.id.cmp(&right.id)));
+    models.sort_by(|left, right| {
+        right
+            .recommended
+            .cmp(&left.recommended)
+            .then(left.id.cmp(&right.id))
+    });
     Ok(models)
 }
 
@@ -1882,6 +1966,25 @@ where
     Ok(rewrite_transcript_segments(merged_segments, true))
 }
 
+fn merge_live_transcript_segments(
+    existing_segments: &[TranscriptSegment],
+    mut refreshed_segments: Vec<TranscriptSegment>,
+    refresh_start_ms: u64,
+) -> Vec<TranscriptSegment> {
+    if refresh_start_ms == 0 {
+        return refreshed_segments;
+    }
+
+    let mut merged = existing_segments
+        .iter()
+        .filter(|segment| segment.end_ms <= refresh_start_ms)
+        .cloned()
+        .collect::<Vec<_>>();
+    merged.append(&mut refreshed_segments);
+    merged.sort_by_key(|segment| (segment.start_ms, segment.end_ms));
+    merged
+}
+
 pub fn transcribe_live_preview_audio(
     app: &AppHandle,
     session: &LectureSession,
@@ -1905,11 +2008,61 @@ pub fn transcribe_live_preview_audio(
     let language = resolve_whisper_language(preferred_language);
     let prompt = resolve_whisper_prompt(prompt_terms);
     let sample_rate = session.live_preview_sample_rate.unwrap_or(16_000);
-    let max_end_ms = Some(wav_duration_ms(&live_preview_audio_path, sample_rate)?);
+    let duration_ms = wav_duration_ms(&live_preview_audio_path, sample_rate)?;
+    let previous_end_ms = session
+        .segments
+        .iter()
+        .map(|segment| segment.end_ms)
+        .max()
+        .unwrap_or(0);
+    if !session.segments.is_empty()
+        && previous_end_ms <= duration_ms
+        && duration_ms <= previous_end_ms.saturating_add(LIVE_TRANSCRIPT_REFRESH_GRACE_MS)
+    {
+        return Ok(session.segments.clone());
+    }
 
-    transcribe_audio_path(
+    let window_start_ms = if session.segments.is_empty() {
+        0
+    } else {
+        duration_ms.saturating_sub(LIVE_TRANSCRIPT_WINDOW_MS)
+    };
+    let transcription_audio_path = if window_start_ms == 0 {
+        live_preview_audio_path.clone()
+    } else {
+        let window_audio_path = live_transcript_window_audio_path(app, &session.id)?;
+        ensure_parent_dir(&window_audio_path)?;
+        let live_preview_audio_path_str = live_preview_audio_path.to_string_lossy().to_string();
+        let window_audio_path_str = window_audio_path.to_string_lossy().to_string();
+        let start_seconds = format!("{:.3}", window_start_ms as f64 / 1000.0);
+        let duration_seconds = format!("{:.3}", (duration_ms - window_start_ms) as f64 / 1000.0);
+        let sample_rate_arg = LIVE_TRANSCRIPT_WINDOW_SAMPLE_RATE.to_string();
+
+        run_ffmpeg(
+            app,
+            &[
+                "-y",
+                "-ss",
+                &start_seconds,
+                "-i",
+                &live_preview_audio_path_str,
+                "-t",
+                &duration_seconds,
+                "-ac",
+                "1",
+                "-ar",
+                &sample_rate_arg,
+                &window_audio_path_str,
+            ],
+            None,
+        )?;
+        window_audio_path
+    };
+    let max_end_ms = Some(duration_ms - window_start_ms);
+
+    let mut refreshed_segments = transcribe_audio_path(
         app,
-        &live_preview_audio_path,
+        &transcription_audio_path,
         &transcript_json_path,
         false,
         preferred_model_id,
@@ -1918,7 +2071,19 @@ pub fn transcribe_live_preview_audio(
         resolve_whisper_threads(&ProcessingSettings::default()),
         max_end_ms,
         None,
-    )
+    )?;
+    if window_start_ms > 0 {
+        for segment in &mut refreshed_segments {
+            segment.start_ms = segment.start_ms.saturating_add(window_start_ms);
+            segment.end_ms = segment.end_ms.saturating_add(window_start_ms);
+        }
+    }
+
+    Ok(merge_live_transcript_segments(
+        &session.segments,
+        refreshed_segments,
+        window_start_ms,
+    ))
 }
 
 struct AudioChunk {
@@ -2078,7 +2243,10 @@ pub fn normalize_audio_for_transcript(
     Ok(())
 }
 
-pub fn prepare_sessions_on_startup(app: &AppHandle, sessions: &mut [LectureSession]) -> Result<bool> {
+pub fn prepare_sessions_on_startup(
+    app: &AppHandle,
+    sessions: &mut [LectureSession],
+) -> Result<bool> {
     let mut changed = false;
 
     for session in sessions {
@@ -2208,19 +2376,6 @@ pub fn append_live_preview_chunk_to_path(
     Ok(())
 }
 
-pub fn append_live_preview_chunk(session: &LectureSession, chunk: &[u8]) -> Result<()> {
-    let path = session
-        .live_preview_audio_path
-        .as_ref()
-        .map(PathBuf::from)
-        .context("The session is missing a live preview audio path.")?;
-    let sample_rate = session
-        .live_preview_sample_rate
-        .context("The session is missing a live preview sample rate.")?;
-
-    append_live_preview_chunk_to_path(&path, sample_rate, chunk)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2245,9 +2400,8 @@ mod tests {
           ]
         }"#;
 
-        let segments =
-            parse_transcript_segments_with_finality(raw, true, None)
-                .expect("segments should parse");
+        let segments = parse_transcript_segments_with_finality(raw, true, None)
+            .expect("segments should parse");
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].start_ms, 0);
         assert_eq!(segments[0].end_ms, 8500);
@@ -2274,9 +2428,8 @@ mod tests {
           ]
         }"#;
 
-        let segments =
-            parse_transcript_segments_with_finality(raw, false, None)
-                .expect("segments should parse");
+        let segments = parse_transcript_segments_with_finality(raw, false, None)
+            .expect("segments should parse");
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "次に分散システムについて");
         assert!(!segments[0].is_final);
@@ -2329,14 +2482,17 @@ mod tests {
         });
 
         assert_eq!(settings.quality_preset, ProcessingQualityPreset::Balanced);
-        assert_eq!(settings.preferred_model_id.as_deref(), Some("ggml-small.bin"));
+        assert_eq!(
+            settings.preferred_model_id.as_deref(),
+            Some("ggml-small.bin")
+        );
         assert_eq!(settings.language, "ja");
         assert_eq!(settings.prompt_terms, "lecture prompt");
         assert_eq!(settings.chunk_duration_minutes, 10);
         assert_eq!(settings.chunk_overlap_seconds, 20);
         assert_eq!(settings.whisper_threads, Some(16));
         assert_eq!(settings.max_parallel_chunks, 1);
-        assert_eq!(settings.live_refresh_interval_seconds, 2);
+        assert_eq!(settings.live_refresh_interval_seconds, 10);
     }
 
     #[test]
@@ -2358,7 +2514,7 @@ mod tests {
         assert_eq!(settings.chunk_overlap_seconds, 120);
         assert_eq!(settings.whisper_threads, None);
         assert_eq!(settings.max_parallel_chunks, 4);
-        assert_eq!(settings.live_refresh_interval_seconds, 30);
+        assert_eq!(settings.live_refresh_interval_seconds, 60);
     }
 
     #[test]

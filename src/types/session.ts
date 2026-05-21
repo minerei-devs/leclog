@@ -57,6 +57,7 @@ export interface SessionSummary {
   audioLevel: number | null;
   captureTargetLabel: string | null;
   segmentCount: number;
+  storageBytes: number;
 }
 
 export interface RecentState {

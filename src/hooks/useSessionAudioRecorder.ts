@@ -67,6 +67,7 @@ export function useSessionAudioRecorder({
   const isStartingRef = useRef(false);
   const suppressAutoStartRef = useRef(false);
   const sessionRef = useRef<LectureSession | null>(session);
+  const lastAudioLevelUpdateRef = useRef(0);
   const [isCapturingAudio, setIsCapturingAudio] = useState(false);
   const [audioStatusLabel, setAudioStatusLabel] = useState("Microphone idle");
   const [audioLevel, setAudioLevel] = useState(0);
@@ -181,6 +182,7 @@ export function useSessionAudioRecorder({
         const input = event.inputBuffer;
         const channelCount = input.numberOfChannels || 1;
         const frameCount = input.length;
+        let peakLevel = 0;
 
         for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
           let mixedSample = 0;
@@ -189,9 +191,7 @@ export function useSessionAudioRecorder({
           }
 
           const monoSample = Math.max(-1, Math.min(1, mixedSample / channelCount));
-          if (frameIndex % 128 === 0) {
-            setAudioLevel((previous) => previous * 0.55 + Math.abs(monoSample) * 0.45);
-          }
+          peakLevel = Math.max(peakLevel, Math.abs(monoSample));
           const pcmValue =
             monoSample < 0
               ? Math.round(monoSample * 0x8000)
@@ -201,6 +201,12 @@ export function useSessionAudioRecorder({
             normalizedValue < 0 ? normalizedValue + 0x1_0000 : normalizedValue;
           livePreviewBytesRef.current.push(unsignedValue & 0xff);
           livePreviewBytesRef.current.push((unsignedValue >> 8) & 0xff);
+        }
+
+        const now = performance.now();
+        if (now - lastAudioLevelUpdateRef.current >= 100) {
+          lastAudioLevelUpdateRef.current = now;
+          setAudioLevel((previous) => previous * 0.55 + peakLevel * 0.45);
         }
       };
 
