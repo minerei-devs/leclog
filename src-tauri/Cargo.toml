@@ -1,6 +1,6 @@
 [package]
 name = "leclog"
-version = "0.3.6"
+version = "0.4.0-alpha.1"
 description = "Leclog desktop app"
 authors = ["OpenAI Codex"]
 edition = "2021"
