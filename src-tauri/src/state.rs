@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -60,6 +61,69 @@ impl SessionState {
         let result = mutator(&mut sessions)?;
         let snapshot = sessions.clone();
         Ok((result, snapshot))
+    }
+}
+
+struct CachedSessionStorageSize {
+    size_bytes: u64,
+    session_updated_at: String,
+    refreshed_at: Instant,
+}
+
+#[derive(Default)]
+pub struct SessionStorageSizeState {
+    sizes: Mutex<HashMap<String, CachedSessionStorageSize>>,
+}
+
+impl SessionStorageSizeState {
+    pub fn get_or_refresh<F>(
+        &self,
+        session_id: &str,
+        session_updated_at: &str,
+        refresh_after: Duration,
+        compute: F,
+    ) -> Result<u64, String>
+    where
+        F: FnOnce() -> u64,
+    {
+        let now = Instant::now();
+        {
+            let sizes = self
+                .sizes
+                .lock()
+                .map_err(|_| String::from("Failed to acquire session storage size lock."))?;
+            if let Some(cached) = sizes.get(session_id) {
+                let version_matches = cached.session_updated_at == session_updated_at;
+                let cache_is_fresh = now.duration_since(cached.refreshed_at) < refresh_after;
+                if version_matches && cache_is_fresh {
+                    return Ok(cached.size_bytes);
+                }
+            }
+        }
+
+        let size_bytes = compute();
+        let mut sizes = self
+            .sizes
+            .lock()
+            .map_err(|_| String::from("Failed to acquire session storage size lock."))?;
+        sizes.insert(
+            session_id.to_string(),
+            CachedSessionStorageSize {
+                size_bytes,
+                session_updated_at: session_updated_at.to_string(),
+                refreshed_at: Instant::now(),
+            },
+        );
+        Ok(size_bytes)
+    }
+
+    pub fn invalidate(&self, session_id: &str) -> Result<(), String> {
+        let mut sizes = self
+            .sizes
+            .lock()
+            .map_err(|_| String::from("Failed to acquire session storage size lock."))?;
+        sizes.remove(session_id);
+        Ok(())
     }
 }
 
@@ -544,8 +608,57 @@ impl ModelDownloadState {
 
 #[cfg(test)]
 mod tests {
-    use super::TranscriptionTaskState;
+    use std::{cell::Cell, time::Duration};
+
+    use super::{SessionStorageSizeState, TranscriptionTaskState};
     use crate::models::{BackgroundTaskKind, BackgroundTaskStatus, TaskFailureLog};
+
+    #[test]
+    fn caches_session_storage_size_until_version_or_ttl_changes() {
+        let state = SessionStorageSizeState::default();
+        let calls = Cell::new(0);
+
+        let first = state
+            .get_or_refresh("session-1", "v1", Duration::from_secs(60), || {
+                calls.set(calls.get() + 1);
+                128
+            })
+            .expect("size should compute");
+        let cached = state
+            .get_or_refresh("session-1", "v1", Duration::from_secs(60), || {
+                calls.set(calls.get() + 1);
+                256
+            })
+            .expect("size should come from cache");
+        let refreshed = state
+            .get_or_refresh("session-1", "v2", Duration::from_secs(60), || {
+                calls.set(calls.get() + 1);
+                512
+            })
+            .expect("size should refresh after version change");
+
+        assert_eq!(first, 128);
+        assert_eq!(cached, 128);
+        assert_eq!(refreshed, 512);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn invalidates_session_storage_size() {
+        let state = SessionStorageSizeState::default();
+
+        state
+            .get_or_refresh("session-1", "v1", Duration::from_secs(60), || 128)
+            .expect("size should compute");
+        state
+            .invalidate("session-1")
+            .expect("cache should invalidate");
+        let refreshed = state
+            .get_or_refresh("session-1", "v1", Duration::from_secs(60), || 256)
+            .expect("size should recompute");
+
+        assert_eq!(refreshed, 256);
+    }
 
     #[test]
     fn tracks_background_task_lifecycle() {
@@ -605,12 +718,12 @@ mod tests {
             )
             .expect("task should be created");
 
-        let canceled = state
-            .cancel_task(&task.id)
-            .expect("task should cancel");
+        let canceled = state.cancel_task(&task.id).expect("task should cancel");
 
         assert_eq!(canceled.status, BackgroundTaskStatus::Canceled);
-        assert!(state.is_canceled(&task.id).expect("cancel check should work"));
+        assert!(state
+            .is_canceled(&task.id)
+            .expect("cancel check should work"));
     }
 
     #[test]

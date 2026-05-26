@@ -35,9 +35,11 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
 
 2. Make sure your Rust toolchain is at least `1.77.2` because the Tauri Store plugin requires it.
 
-3. Install `whisper.cpp` and place a GGML model at `src-tauri/models/ggml-base.bin`, or set:
+3. Release builds bundle `whisper-cli`; for local development, either add the `whisper-cli-<target-triple>` sidecar under `src-tauri/binaries/`, provide a downloadable runtime asset, or install the Homebrew fallback. Models are downloaded automatically on first transcription when missing, or you can override paths with:
 
    - `LECLOG_WHISPER_PATH`
+   - `LECLOG_WHISPER_RUNTIME_URL`
+   - `LECLOG_WHISPER_RUNTIME_SHA256`
    - `LECLOG_WHISPER_MODEL_PATH`
    - `LECLOG_WHISPER_LANGUAGE`
    - `LECLOG_WHISPER_PROMPT`
@@ -46,8 +48,6 @@ Minimal Tauri 2 desktop MVP for local-first lecture sessions.
 
    ```bash
    brew install whisper-cpp
-   mkdir -p src-tauri/models
-   curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin -o src-tauri/models/ggml-base.bin
    ```
 
    Leclog defaults to Whisper language auto-detection. For Japanese lectures,
@@ -74,15 +74,15 @@ The app now exposes runtime checks in the Settings sheet:
 - at least one local Whisper model is available
 - interrupted `processing` sessions and partial model downloads are visible
 
-If `whisper-cli` or a model is missing, recording and imports still create local session files, but final transcription tasks fail with a recoverable error. Install a model from Settings or place one under `src-tauri/models/`, then use the session detail resource manager to reprocess.
+Release builds include `whisper-cli`. If it is missing in a development build, recording and imports still create local session files, and the final transcription task tries to download an app-managed runtime before transcribing. If no model is installed, the same task automatically downloads the recommended app-managed model.
 
 ## Runtime packaging strategy
 
-The app should own as much of the runtime as is practical, but not every dependency belongs in the installer by default:
+The app should own as much of the runtime as is practical:
 
 - `ffmpeg`: bundled as a Tauri sidecar for macOS Apple Silicon releases.
-- `whisper-cli`: supported as an app sidecar when a `whisper-cli-<target-triple>` binary is added under `src-tauri/binaries/`; current releases also resolve Homebrew and `PATH`.
-- Whisper models: app-managed downloads into the local app data directory. They are intentionally not bundled by default to keep installer size and model choice under user control.
+- `whisper-cli`: bundled as a Tauri sidecar in release builds; app-managed download, Homebrew, and `PATH` remain development/fallback paths.
+- Whisper models: downloaded into the local app data directory on first transcription when none is installed, keeping the installer small while avoiding manual setup.
 
 First-run guidance appears on the New Session screen when a required runtime piece is missing. The same checks are always available under Settings → Overview.
 
@@ -157,4 +157,4 @@ Release flow:
 
 You can also run the workflow manually from the GitHub Actions page with `workflow_dispatch`.
 
-If you later want Intel macOS, Windows, or Linux release artifacts, add the matching `ffmpeg-<target-triple>` binaries under `src-tauri/binaries/` first, then expand the workflow matrix.
+If you later want Intel macOS, Windows, or Linux release artifacts, add the matching `ffmpeg-<target-triple>` and `whisper-cli-<target-triple>` binaries under `src-tauri/binaries/` first, then expand the workflow matrix.

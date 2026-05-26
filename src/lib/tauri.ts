@@ -88,6 +88,10 @@ export function downloadTranscriptionModel(modelId: string) {
   });
 }
 
+export function prepareTranscriptionRuntime() {
+  return invoke<void>("prepare_transcription_runtime");
+}
+
 export function deleteTranscriptionModel(modelId: string) {
   return invoke<void>("delete_transcription_model", {
     modelId,
@@ -243,6 +247,10 @@ export function listResources() {
 
 export function deleteSession(sessionId: string) {
   return invoke<void>("delete_session", { sessionId });
+}
+
+export function cleanupSessionIntermediates(sessionId: string) {
+  return invoke<LectureSession>("cleanup_session_intermediates", { sessionId });
 }
 
 export function deleteResource(

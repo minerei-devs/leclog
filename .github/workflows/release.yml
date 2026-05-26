@@ -33,6 +33,7 @@ jobs:
     runs-on: macos-latest
     env:
       CI: true
+      WHISPER_CPP_TAG: v1.8.4
 
     steps:
       - name: Checkout repository
@@ -150,6 +151,65 @@ jobs:
           chmod 600 "${key_path}"
           echo "APPLE_API_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
 
+      - name: Build and stage whisper runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          work_dir="${RUNNER_TEMP}/whisper-runtime"
+          artifact_dir="${RUNNER_TEMP}/whisper-runtime-artifacts"
+          rm -rf "${work_dir}" "${artifact_dir}"
+          mkdir -p "${work_dir}" "${artifact_dir}"
+
+          git clone \
+            --depth 1 \
+            --branch "${WHISPER_CPP_TAG}" \
+            https://github.com/ggml-org/whisper.cpp.git \
+            "${work_dir}/whisper.cpp"
+
+          cmake \
+            -S "${work_dir}/whisper.cpp" \
+            -B "${work_dir}/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_BUILD_SERVER=OFF
+
+          cmake \
+            --build "${work_dir}/build" \
+            --config Release \
+            --target whisper-cli \
+            --parallel "$(sysctl -n hw.ncpu)"
+
+          runtime_asset="${artifact_dir}/whisper-cli-aarch64-apple-darwin"
+          cp "${work_dir}/build/bin/whisper-cli" "${runtime_asset}"
+          chmod 755 "${runtime_asset}"
+
+          otool -L "${runtime_asset}" | tee "${artifact_dir}/whisper-cli-aarch64-apple-darwin.otool.txt"
+          if grep -E '/opt/homebrew|@rpath/libwhisper|@rpath/libggml' "${artifact_dir}/whisper-cli-aarch64-apple-darwin.otool.txt"; then
+            echo "whisper-cli has non-system dynamic dependencies; build a self-contained runtime before release." >&2
+            exit 1
+          fi
+
+          (
+            cd "${artifact_dir}"
+            shasum -a 256 whisper-cli-aarch64-apple-darwin > whisper-cli-aarch64-apple-darwin.sha256
+          )
+
+          cp "${runtime_asset}" "src-tauri/binaries/whisper-cli-aarch64-apple-darwin"
+
+          node <<'NODE'
+          const fs = require("fs");
+
+          const configPath = "src-tauri/tauri.conf.json";
+          const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+          const externalBin = new Set(config.bundle.externalBin || []);
+          externalBin.add("binaries/ffmpeg");
+          externalBin.add("binaries/whisper-cli");
+          config.bundle.externalBin = Array.from(externalBin);
+          fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+
       - name: Build and publish Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -171,6 +231,21 @@ jobs:
           releaseDraft: ${{ steps.meta.outputs.draft }}
           prerelease: ${{ steps.meta.outputs.prerelease }}
           generateReleaseNotes: true
+
+      - name: Upload whisper runtime asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          artifact_dir="${RUNNER_TEMP}/whisper-runtime-artifacts"
+          gh release upload "${RELEASE_TAG}" \
+            "${artifact_dir}/whisper-cli-aarch64-apple-darwin" \
+            "${artifact_dir}/whisper-cli-aarch64-apple-darwin.sha256" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
 
       - name: Re-sign final updater asset
         shell: bash

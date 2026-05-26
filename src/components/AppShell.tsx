@@ -1,15 +1,18 @@
 import type { PropsWithChildren } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowUpRight,
+  Check,
   Clock3,
   FolderCog,
   FolderSearch,
+  HardDrive,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   RotateCcw,
+  SlidersHorizontal,
   Waves,
   XCircle,
 } from "lucide-react";
@@ -90,6 +93,7 @@ function formatSidebarTime(date: string) {
 }
 
 const LARGE_SESSION_BYTES = 1024 ** 3;
+type SessionSortMode = "recent" | "size";
 
 function sessionStorageBadgeClass(storageBytes: number) {
   if (storageBytes >= LARGE_SESSION_BYTES) {
@@ -97,6 +101,22 @@ function sessionStorageBadgeClass(storageBytes: number) {
   }
 
   return "border-slate-200 bg-slate-50 text-slate-500";
+}
+
+function activeSessionScore(session: Pick<SessionSummary, "status" | "transcriptPhase">) {
+  if (session.status === "recording") {
+    return 4;
+  }
+  if (session.status === "processing" || session.transcriptPhase === "processing") {
+    return 3;
+  }
+  if (session.status === "paused" || session.transcriptPhase === "live") {
+    return 2;
+  }
+  if (session.status === "idle") {
+    return 1;
+  }
+  return 0;
 }
 
 function isVisibleSessionTask(task: BackgroundTask) {
@@ -190,6 +210,7 @@ export function AppShell({ children }: PropsWithChildren) {
   const location = useLocation();
   const navigate = useNavigate();
   const { settings: appSettings, isLoaded: appSettingsLoaded } = useAppSettings();
+  const sessionViewMenuRef = useRef<HTMLDivElement | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -199,6 +220,9 @@ export function AppShell({ children }: PropsWithChildren) {
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [taskPanelError, setTaskPanelError] = useState<string | null>(null);
   const [availableUpdateVersion, setAvailableUpdateVersion] = useState<string | null>(null);
+  const [sessionSortMode, setSessionSortMode] = useState<SessionSortMode>("recent");
+  const [showLargeSessionsOnly, setShowLargeSessionsOnly] = useState(false);
+  const [isSessionViewMenuOpen, setIsSessionViewMenuOpen] = useState(false);
   const hasActiveProcessing = sessions.some(
     (session) =>
       session.status !== "done" ||
@@ -304,14 +328,66 @@ export function AppShell({ children }: PropsWithChildren) {
     };
   }, []);
 
-  const sortedSessions = useMemo(
-    () =>
-      [...sessions].sort(
-        (left, right) =>
-          new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
-    ),
+  useEffect(() => {
+    if (!isSessionViewMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: MouseEvent) {
+      if (
+        sessionViewMenuRef.current &&
+        !sessionViewMenuRef.current.contains(event.target as Node)
+      ) {
+        setIsSessionViewMenuOpen(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsSessionViewMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isSessionViewMenuOpen]);
+
+  const largeSessionCount = useMemo(
+    () => sessions.filter((session) => session.storageBytes >= LARGE_SESSION_BYTES).length,
     [sessions],
   );
+  const sortedSessions = useMemo(() => {
+    const visibleSessions = showLargeSessionsOnly
+      ? sessions.filter((session) => session.storageBytes >= LARGE_SESSION_BYTES)
+      : [...sessions];
+
+    return visibleSessions.sort((left, right) => {
+      const activityScore = activeSessionScore(right) - activeSessionScore(left);
+      if (activityScore !== 0) {
+        return activityScore;
+      }
+      if (sessionSortMode === "size") {
+        return (
+          right.storageBytes - left.storageBytes ||
+          new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+        );
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    });
+  }, [sessionSortMode, sessions, showLargeSessionsOnly]);
+  const sessionSortLabel = sessionSortMode === "size" ? "Size" : "Recent";
+  const sessionFilterLabel = showLargeSessionsOnly ? "Large only" : "All sessions";
+  const sessionCountLabel =
+    sessions.length === 0
+      ? "No local sessions yet"
+      : showLargeSessionsOnly
+        ? `${sortedSessions.length} of ${sessions.length} large sessions`
+        : `${sessions.length} saved locally`;
+  const isNewSessionRoute = location.pathname === "/new";
   const activeTaskCount = tasks.filter(isActiveTask).length;
   const visibleTasks = useMemo(
     () =>
@@ -462,15 +538,18 @@ export function AppShell({ children }: PropsWithChildren) {
             <div className="grid gap-1.5">
               <Link
                 className={cn(
-                  "inline-flex h-8.5 items-center rounded-lg bg-slate-950 text-sm font-medium text-white transition-colors hover:bg-slate-900",
+                  "inline-flex h-8.5 items-center rounded-lg border text-sm font-medium transition-colors",
                   isSidebarCollapsed ? "justify-center px-0" : "justify-start gap-2 px-2.5",
+                  isNewSessionRoute
+                    ? "border-slate-950 bg-slate-950 text-white hover:bg-slate-900 [&_span]:text-white [&_svg]:text-white"
+                    : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50",
                 )}
                 to="/new"
                 aria-label="New session"
                 title="New session"
               >
-                <Plus className="size-4 text-white" />
-                {isSidebarCollapsed ? null : <span className="text-white">New session</span>}
+                <Plus className={cn("size-4", isNewSessionRoute ? "text-white" : "text-slate-500")} />
+                {isSidebarCollapsed ? null : <span>New session</span>}
               </Link>
 
               <Button
@@ -512,8 +591,8 @@ export function AppShell({ children }: PropsWithChildren) {
 
           <div
             className={cn(
-              "flex items-center py-2.5",
-              isSidebarCollapsed ? "justify-center px-2" : "justify-between px-3",
+              "py-2.5",
+              isSidebarCollapsed ? "flex justify-center px-2" : "px-3",
             )}
           >
             {isSidebarCollapsed ? (
@@ -525,21 +604,98 @@ export function AppShell({ children }: PropsWithChildren) {
                 {sortedSessions.length}
               </Badge>
             ) : (
-              <>
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    Sessions
-                  </p>
-                  <p className="mt-0.5 text-xs text-slate-500">
-                    {sortedSessions.length === 0
-                      ? "No local sessions yet"
-                      : `${sortedSessions.length} saved locally`}
-                  </p>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                      Sessions
+                    </p>
+                    <p className="mt-0.5 truncate text-xs text-slate-500">
+                      {sessionCountLabel}
+                    </p>
+                  </div>
+                  <div ref={sessionViewMenuRef} className="relative shrink-0">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      className="h-7 gap-1 rounded-lg border-slate-200 bg-white px-2 text-[11px] text-slate-700"
+                      aria-haspopup="menu"
+                      aria-expanded={isSessionViewMenuOpen}
+                      title="Change session list view"
+                      onClick={() => setIsSessionViewMenuOpen((value) => !value)}
+                    >
+                      <SlidersHorizontal className="size-3" />
+                      View
+                    </Button>
+                    {isSessionViewMenuOpen ? (
+                      <div
+                        className="absolute right-0 top-8 z-50 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white py-1.5 text-sm shadow-xl"
+                        role="menu"
+                      >
+                        <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                          Sort by
+                        </div>
+                        {[
+                          { value: "recent" as const, label: "Recently updated", icon: Clock3 },
+                          { value: "size" as const, label: "Largest first", icon: HardDrive },
+                        ].map((item) => {
+                          const Icon = item.icon;
+                          const selected = sessionSortMode === item.value;
+                          return (
+                            <button
+                              key={item.value}
+                              type="button"
+                              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50"
+                              role="menuitemradio"
+                              aria-checked={selected}
+                              onClick={() => {
+                                setSessionSortMode(item.value);
+                                setIsSessionViewMenuOpen(false);
+                              }}
+                            >
+                              <Icon className="size-3.5 text-slate-500" />
+                              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                              {selected ? <Check className="size-3.5 text-blue-600" /> : null}
+                            </button>
+                          );
+                        })}
+                        <Separator className="my-1" />
+                        <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                          Show
+                        </div>
+                        {[
+                          { value: false, label: "All sessions" },
+                          { value: true, label: `Large sessions (${largeSessionCount})` },
+                        ].map((item) => {
+                          const selected = showLargeSessionsOnly === item.value;
+                          return (
+                            <button
+                              key={item.label}
+                              type="button"
+                              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50"
+                              role="menuitemradio"
+                              aria-checked={selected}
+                              onClick={() => {
+                                setShowLargeSessionsOnly(item.value);
+                                setIsSessionViewMenuOpen(false);
+                              }}
+                            >
+                              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                              {selected ? <Check className="size-3.5 text-blue-600" /> : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
-                <Badge variant="outline" className="rounded-full border-slate-200 px-2 py-0.5 text-[11px]">
-                  {sortedSessions.length}
-                </Badge>
-              </>
+                <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-slate-500">
+                  <span className="truncate">Sort: {sessionSortLabel}</span>
+                  <span className="text-slate-300">/</span>
+                  <span className="truncate">Show: {sessionFilterLabel}</span>
+                </div>
+              </div>
             )}
           </div>
 
@@ -552,7 +708,11 @@ export function AppShell({ children }: PropsWithChildren) {
                     isSidebarCollapsed ? "h-9 px-0 py-0" : "px-3 py-4",
                   )}
                 >
-                  {isSidebarCollapsed ? null : "New sessions and imported media will appear here."}
+                  {isSidebarCollapsed
+                    ? null
+                    : showLargeSessionsOnly
+                      ? "No sessions at or above 1 GiB."
+                      : "New sessions and imported media will appear here."}
                 </div>
               ) : (
                 sortedSessions.map((session) => {

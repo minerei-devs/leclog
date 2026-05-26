@@ -14,6 +14,7 @@ import {
   downloadTranscriptionModel,
   getRuntimeStatus,
   listAvailableTranscriptionModels,
+  prepareTranscriptionRuntime,
 } from "@/lib/tauri";
 import type { ManagedTranscriptionModel, RuntimeStatus } from "@/types/session";
 import { Badge } from "@/components/ui/badge";
@@ -31,6 +32,7 @@ function runtimeSource(path: string | null, binaryName: string) {
     return "Not resolved";
   }
   if (
+    path.includes(`/runtime/${binaryName}`) ||
     path.includes(`/binaries/${binaryName}`) ||
     path.includes(`/Contents/MacOS/${binaryName}`) ||
     path.includes(`${binaryName}-aarch64-apple-darwin`)
@@ -65,6 +67,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
   const [models, setModels] = useState<ManagedTranscriptionModel[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [busyModelId, setBusyModelId] = useState<string | null>(null);
+  const [isPreparing, setIsPreparing] = useState(false);
   const [copiedCommand, setCopiedCommand] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -127,6 +130,20 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
     }
   }
 
+  async function handlePrepareRuntime() {
+    setIsPreparing(true);
+    setError(null);
+    try {
+      await prepareTranscriptionRuntime();
+      await refresh();
+      openSettingsPanel("tasks");
+    } catch (reason) {
+      setError(getErrorMessage(reason, "Failed to prepare transcription runtime."));
+    } finally {
+      setIsPreparing(false);
+    }
+  }
+
   async function handleCopyWhisperCommand() {
     try {
       await navigator.clipboard.writeText(WHISPER_INSTALL_COMMAND);
@@ -170,11 +187,17 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
             </Badge>
           </div>
           <p className="mt-1 text-xs text-slate-500">
-            ffmpeg ships with the macOS app. Whisper uses GPU acceleration when the detected sidecar or Homebrew build exposes it.
+            Release builds ship ffmpeg and whisper-cli sidecars. Leclog downloads the default model on the first transcription when one is not installed.
           </p>
         </div>
 
         <div className="flex items-center gap-1.5">
+          {!isReady ? (
+            <Button type="button" size="sm" disabled={isPreparing} onClick={() => void handlePrepareRuntime()}>
+              <Download className="size-3.5" />
+              {isPreparing ? "Preparing" : "Prepare now"}
+            </Button>
+          ) : null}
           <Button type="button" variant="outline" size="sm" onClick={() => void refresh()}>
             <RefreshCw className="size-3.5" />
             Check
@@ -248,7 +271,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
           {missingModel && recommendedModel ? (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2">
               <p className="min-w-0 text-xs text-amber-900">
-                No Whisper model is installed. Start with {recommendedModel.label} ({formatBytes(recommendedModel.sizeBytes)}).
+                No Whisper model is installed. Leclog will download {recommendedModel.label} ({formatBytes(recommendedModel.sizeBytes)}) when transcription starts.
               </p>
               <Button
                 type="button"
@@ -257,7 +280,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
                 onClick={() => void handleDownloadModel(recommendedModel)}
               >
                 <Download className="size-3.5" />
-                {recommendedModel.downloadStatus === "downloading" ? "Downloading" : "Download"}
+                {recommendedModel.downloadStatus === "downloading" ? "Downloading" : "Download now"}
               </Button>
             </div>
           ) : null}
@@ -265,7 +288,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
           {missingWhisper ? (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2">
               <p className="min-w-0 text-xs text-amber-900">
-                whisper-cli is not bundled in this build. Install it with Homebrew, then recheck.
+                whisper-cli is missing from this build. Add the sidecar for release builds, or install the Homebrew fallback for local development.
               </p>
               <Button type="button" variant="outline" size="sm" onClick={() => void handleCopyWhisperCommand()}>
                 {copiedCommand ? <CheckCircle2 className="size-3.5" /> : <Copy className="size-3.5" />}

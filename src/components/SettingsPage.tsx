@@ -43,6 +43,7 @@ import {
   listBackgroundTasks,
   listResources,
   listTranscriptionModels,
+  prepareTranscriptionRuntime,
   revealResource,
   retrySessionProcessing,
 } from "@/lib/tauri";
@@ -439,6 +440,12 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
     processingSettings.preferredModelId ??
     "Preset default";
   const activeTaskCount = tasks.filter(isActiveTask).length;
+  const isRuntimeReady = Boolean(
+    runtimeStatus?.isAppDataWritable &&
+      runtimeStatus.ffmpegAvailable &&
+      runtimeStatus.whisperAvailable &&
+      runtimeStatus.installedModelCount > 0,
+  );
   const modelResources = useMemo(
     () =>
       resourceOverview?.resources.filter((resource) =>
@@ -497,6 +504,19 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
       setActivePanel("tasks");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to start model download.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handlePrepareRuntime() {
+    setBusyId("runtime");
+    try {
+      await prepareTranscriptionRuntime();
+      await Promise.all([refreshTasks(), refreshModels(), refreshOverview()]);
+      setActivePanel("tasks");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to prepare transcription runtime.");
     } finally {
       setBusyId(null);
     }
@@ -773,6 +793,42 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
                   />
                   <Stat label="Active tasks" value={String(activeTaskCount)} detail={`${tasks.length} tracked`} />
                 </div>
+                <div
+                  className={[
+                    "flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3",
+                    isRuntimeReady
+                      ? "border-emerald-200 bg-emerald-50"
+                      : "border-slate-200 bg-white",
+                  ].join(" ")}
+                >
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {isRuntimeReady ? (
+                        <CheckCircle2 className="size-4 shrink-0 text-emerald-700" />
+                      ) : (
+                        <AlertTriangle className="size-4 shrink-0 text-amber-600" />
+                      )}
+                      <p className={["text-sm font-semibold", isRuntimeReady ? "text-emerald-950" : "text-slate-950"].join(" ")}>
+                        Transcription runtime
+                      </p>
+                    </div>
+                    <p className={["mt-0.5 truncate text-xs", isRuntimeReady ? "text-emerald-700" : "text-slate-500"].join(" ")}>
+                      {isRuntimeReady
+                        ? `Ready with ${runtimeStatus?.installedModelLabels.join(", ") || "installed model"}.`
+                        : "Download the speech engine and recommended model into app data."}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant={isRuntimeReady ? "outline" : "default"}
+                    size="sm"
+                    disabled={busyId === "runtime" || isRuntimeReady}
+                    onClick={() => void handlePrepareRuntime()}
+                  >
+                    {isRuntimeReady ? <CheckCircle2 className="size-3.5" /> : <Download className="size-3.5" />}
+                    {isRuntimeReady ? "Ready" : busyId === "runtime" ? "Preparing" : "Prepare runtime"}
+                  </Button>
+                </div>
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -1038,7 +1094,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
               <div className="space-y-3">
                 <SectionHeader
                   title="Model manager"
-                  detail={`${installedCount} installed. Preferred: ${preferredModelLabel}.`}
+                  detail={`${installedCount} installed. First transcription downloads the recommended model when none is installed. Preferred: ${preferredModelLabel}.`}
                   icon={<Gauge className="size-4" />}
                 />
                 <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white">

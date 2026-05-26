@@ -1,6 +1,15 @@
 import { Copy, Eraser, FolderSearch, RotateCcw, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
-import { deleteResource, deleteSession, getSession, revealResource, retrySessionProcessing } from "@/lib/tauri";
+import { useEffect, useMemo, useState } from "react";
+import {
+  cleanupSessionIntermediates,
+  deleteResource,
+  deleteSession,
+  getSession,
+  listResources,
+  revealResource,
+  retrySessionProcessing,
+} from "@/lib/tauri";
+import { formatBytes } from "@/lib/format";
 import type { LectureSession } from "@/types/session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,10 +28,12 @@ interface ArtifactRow {
   kind: string;
   revealable: boolean;
   deletable: boolean;
+  sizeBytes?: number;
 }
 
 type PendingDelete =
   | { kind: "session" }
+  | { kind: "intermediates" }
   | { kind: "resource"; row: ArtifactRow }
   | null;
 
@@ -40,10 +51,12 @@ export function SessionArtifacts({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
+  const [resourceSizes, setResourceSizes] = useState<Record<string, number>>({});
+  const [resourceRefreshKey, setResourceRefreshKey] = useState(0);
   const canDeleteSession = session.status !== "recording";
   const canDeleteResources = canDeleteSession && session.transcriptPhase !== "processing";
 
-  const rows = useMemo<ArtifactRow[]>(() => {
+  const baseRows = useMemo<ArtifactRow[]>(() => {
     const baseRows: ArtifactRow[] = [
       {
         label: "Session folder",
@@ -115,6 +128,52 @@ export function SessionArtifacts({
     ].filter((row) => row.value.trim().length > 0);
   }, [canDeleteResources, canDeleteSession, session]);
 
+  const resourcePathsKey = useMemo(
+    () => baseRows.map((row) => row.value).join("\n"),
+    [baseRows],
+  );
+
+  useEffect(() => {
+    const paths = new Set(resourcePathsKey.split("\n").filter(Boolean));
+    if (paths.size === 0) {
+      setResourceSizes({});
+      return;
+    }
+
+    let isMounted = true;
+    void listResources()
+      .then((overview) => {
+        if (!isMounted) {
+          return;
+        }
+        const nextSizes: Record<string, number> = {};
+        for (const resource of overview.resources) {
+          if (paths.has(resource.path)) {
+            nextSizes[resource.path] = resource.sizeBytes;
+          }
+        }
+        setResourceSizes(nextSizes);
+      })
+      .catch(() => {
+        if (isMounted) {
+          setResourceSizes({});
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [resourcePathsKey, resourceRefreshKey]);
+
+  const rows = useMemo<ArtifactRow[]>(
+    () =>
+      baseRows.map((row) => ({
+        ...row,
+        sizeBytes: resourceSizes[row.value],
+      })),
+    [baseRows, resourceSizes],
+  );
+
   if (rows.length === 0) {
     return null;
   }
@@ -172,6 +231,22 @@ export function SessionArtifacts({
     }
   }
 
+  async function handleCleanupIntermediates() {
+    try {
+      setBusyAction("cleanup-intermediates");
+      setError(null);
+      const updated = await cleanupSessionIntermediates(session.id);
+      onSessionUpdate?.(updated);
+      setResourceRefreshKey((value) => value + 1);
+      window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
+      setPendingDelete(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Failed to clear generated files.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function handleClear(row: ArtifactRow) {
     const isSessionFolder = row.kind === "folder";
     if (isSessionFolder) {
@@ -194,6 +269,11 @@ export function SessionArtifacts({
       return;
     }
 
+    if (pendingDelete.kind === "intermediates") {
+      await handleCleanupIntermediates();
+      return;
+    }
+
     const row = pendingDelete.row;
     try {
       setBusyAction(`clear:${row.value}`);
@@ -201,6 +281,8 @@ export function SessionArtifacts({
       await deleteResource(row.value, session.id, null);
       const updated = await getSession(session.id);
       onSessionUpdate?.(updated);
+      setResourceRefreshKey((value) => value + 1);
+      window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
       setPendingDelete(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to clear this resource.");
@@ -210,7 +292,9 @@ export function SessionArtifacts({
   }
 
   const captureCount = session.audioFilePaths.length;
-  const processedCount = rows.filter((row) => row.kind === "processed" || row.kind === "transcript").length;
+  const processedCount = rows.filter(
+    (row) => row.kind === "processed" || row.kind === "transcript",
+  ).length;
 
   return (
     <section
@@ -227,7 +311,7 @@ export function SessionArtifacts({
             {captureCount} capture file(s), {processedCount} processed artifact(s)
           </p>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center justify-end gap-1">
           <Button
             type="button"
             variant="outline"
@@ -241,6 +325,24 @@ export function SessionArtifacts({
           </Button>
           <Button
             type="button"
+            variant="outline"
+            size="sm"
+            title="Clear generated audio previews, chunk JSON, and scratch files while keeping captures and transcripts."
+            disabled={
+              !canDeleteResources ||
+              busyAction === "cleanup-intermediates" ||
+              busyAction?.startsWith("clear:")
+            }
+            onClick={() => {
+              setError(null);
+              setPendingDelete({ kind: "intermediates" });
+            }}
+          >
+            <Eraser className="size-3.5" />
+            Generated
+          </Button>
+          <Button
+            type="button"
             variant="destructive"
             size="sm"
             title="Clear this session and all Leclog-managed files for it."
@@ -250,13 +352,19 @@ export function SessionArtifacts({
               setPendingDelete({ kind: "session" });
             }}
           >
-            <Eraser className="size-3.5" />
+            <Trash2 className="size-3.5" />
             Clear all
           </Button>
         </div>
       </div>
 
-      <div className={fillAvailable ? "min-h-0 flex-1 overflow-y-auto px-2.5" : "max-h-[42vh] overflow-y-auto px-2.5"}>
+      <div
+        className={
+          fillAvailable
+            ? "min-h-0 flex-1 overflow-y-auto px-2.5"
+            : "max-h-[42vh] overflow-y-auto px-2.5"
+        }
+      >
         {rows.map((row) => (
           <div
             key={`${row.label}-${row.value}`}
@@ -265,7 +373,10 @@ export function SessionArtifacts({
           >
             <div className="min-w-0">
               <div className="flex min-w-0 items-center gap-2">
-                <Badge variant="outline" className="rounded-md border-slate-200 bg-slate-50 px-1.5 text-[10px] text-slate-600">
+                <Badge
+                  variant="outline"
+                  className="rounded-md border-slate-200 bg-slate-50 px-1.5 text-[10px] text-slate-600"
+                >
                   {row.kind}
                 </Badge>
                 <p className="min-w-[88px] truncate text-xs font-medium text-slate-950">{row.label}</p>
@@ -276,7 +387,18 @@ export function SessionArtifacts({
             </div>
 
             <div className="flex items-center gap-1">
-              <Button type="button" variant="ghost" size="icon-sm" title="Copy path" onClick={() => void handleCopy(row.value)}>
+              {typeof row.sizeBytes === "number" ? (
+                <span className="shrink-0 text-[11px] tabular-nums text-slate-400">
+                  {formatBytes(row.sizeBytes)}
+                </span>
+              ) : null}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title="Copy path"
+                onClick={() => void handleCopy(row.value)}
+              >
                 <Copy className="size-3.5" />
               </Button>
               {row.revealable ? (
@@ -312,10 +434,18 @@ export function SessionArtifacts({
 
       <ConfirmDialog
         open={pendingDelete !== null}
-        title={pendingDelete?.kind === "resource" ? `Clear ${pendingDelete.row.label}?` : "Clear session resources?"}
+        title={
+          pendingDelete?.kind === "resource"
+            ? `Clear ${pendingDelete.row.label}?`
+            : pendingDelete?.kind === "intermediates"
+              ? "Clear generated files?"
+              : "Clear session resources?"
+        }
         description={
           pendingDelete?.kind === "resource"
             ? "This clears only this Leclog-managed resource from the session. Source files outside app data are not touched."
+            : pendingDelete?.kind === "intermediates"
+              ? "This clears generated audio previews, chunk JSON, and scratch files. Capture files and transcript text files are kept."
             : canDeleteSession
               ? "This clears the session record and all Leclog-managed files for it. Any active processing task for this session will be canceled first."
               : "This session is actively recording. Pause or stop recording before clearing it."
@@ -323,14 +453,37 @@ export function SessionArtifacts({
         details={
           pendingDelete?.kind === "resource"
             ? [pendingDelete.row.value]
+            : pendingDelete?.kind === "intermediates"
+              ? [
+                  session.title,
+                  "normalized.wav, live-preview.wav, transcript.json, chunk JSON, live transcript scratch files",
+                ]
             : [session.title, session.sessionDir ?? "Managed session folder"]
         }
-        confirmLabel={pendingDelete?.kind === "resource" ? "Clear resource" : "Clear all"}
-        isBusy={busyAction?.startsWith("delete") || busyAction?.startsWith("clear") || false}
-        confirmDisabled={pendingDelete?.kind === "session" && !canDeleteSession}
+        confirmLabel={
+          pendingDelete?.kind === "resource"
+            ? "Clear resource"
+            : pendingDelete?.kind === "intermediates"
+              ? "Clear generated"
+              : "Clear all"
+        }
+        isBusy={
+          busyAction?.startsWith("delete") ||
+          busyAction?.startsWith("clear") ||
+          busyAction?.startsWith("cleanup") ||
+          false
+        }
+        confirmDisabled={
+          (pendingDelete?.kind === "session" && !canDeleteSession) ||
+          (pendingDelete?.kind === "intermediates" && !canDeleteResources)
+        }
         error={error}
         onCancel={() => {
-          if (!busyAction?.startsWith("delete") && !busyAction?.startsWith("clear")) {
+          if (
+            !busyAction?.startsWith("delete") &&
+            !busyAction?.startsWith("clear") &&
+            !busyAction?.startsWith("cleanup")
+          ) {
             setPendingDelete(null);
             setError(null);
           }

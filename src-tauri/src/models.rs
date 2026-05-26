@@ -254,6 +254,7 @@ pub enum BackgroundTaskKind {
     FinalTranscription,
     LiveTranscription,
     ModelDownload,
+    RuntimeSetup,
     ImportMedia,
     Cleanup,
 }

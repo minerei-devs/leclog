@@ -7,8 +7,8 @@ mod storage;
 mod system_audio;
 
 use state::{
-    AudioMeterState, ModelDownloadState, SessionState, SystemAudioCaptureState,
-    TranscriptionTaskState,
+    AudioMeterState, ModelDownloadState, SessionState, SessionStorageSizeState,
+    SystemAudioCaptureState, TranscriptionTaskState,
 };
 use tauri::Manager;
 
@@ -56,6 +56,7 @@ fn main() {
             app.manage(SessionState::new(sessions));
             app.manage(SystemAudioCaptureState::default());
             app.manage(AudioMeterState::default());
+            app.manage(SessionStorageSizeState::default());
             app.manage(TranscriptionTaskState::default());
             app.manage(ModelDownloadState::default());
 
@@ -104,6 +105,7 @@ fn main() {
             commands::session_commands::list_resources,
             commands::session_commands::delete_session,
             commands::session_commands::delete_resource,
+            commands::session_commands::cleanup_session_intermediates,
             commands::session_commands::reveal_resource,
             commands::session_commands::list_background_tasks,
             commands::session_commands::cancel_background_task,
@@ -113,6 +115,7 @@ fn main() {
             commands::session_commands::list_transcription_models,
             commands::session_commands::list_available_transcription_models,
             commands::session_commands::download_transcription_model,
+            commands::session_commands::prepare_transcription_runtime,
             commands::session_commands::delete_transcription_model,
             commands::session_commands::append_segment,
             commands::session_commands::begin_audio_segment,

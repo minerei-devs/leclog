@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
@@ -57,6 +58,8 @@ const DEFAULT_WHISPER_MODEL_FILE_NAMES: [&str; 8] = [
 ];
 
 const MODEL_REPOSITORY_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+const WHISPER_RUNTIME_REPOSITORY_BASE_URL: &str =
+    "https://github.com/minerei-devs/leclog/releases/latest/download";
 const MANAGED_MODEL_CATALOG: [(&str, &str, u64, bool); 4] = [
     ("ggml-base.bin", "Base", 142 * 1024 * 1024, false),
     ("ggml-small.bin", "Small", 466 * 1024 * 1024, true),
@@ -310,6 +313,18 @@ pub fn list_persisted_failed_tasks(app: &AppHandle) -> Result<Vec<BackgroundTask
 
 pub fn app_models_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_data_dir(app)?.join("models"))
+}
+
+pub fn app_runtime_dir(app: &AppHandle) -> Result<PathBuf> {
+    Ok(app_data_dir(app)?.join("runtime"))
+}
+
+fn whisper_runtime_file_name() -> String {
+    format!("whisper-cli-{}", current_target_triple())
+}
+
+fn managed_whisper_cli_path(app: &AppHandle) -> Result<PathBuf> {
+    Ok(app_runtime_dir(app)?.join(whisper_runtime_file_name()))
 }
 
 fn processing_settings_path(app: &AppHandle) -> Result<PathBuf> {
@@ -612,6 +627,12 @@ pub fn resolve_whisper_cli_path(app: &AppHandle) -> PathBuf {
         }
     }
 
+    if let Ok(candidate) = managed_whisper_cli_path(app) {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
     let target_triple = current_target_triple();
     let local_sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
@@ -889,6 +910,127 @@ where
             .context("Failed to write model bytes to disk.")?;
         downloaded_bytes = downloaded_bytes.saturating_add(read as u64);
         on_progress(downloaded_bytes, total_bytes).map_err(|error| anyhow::anyhow!(error))?;
+    }
+
+    fs::rename(&temp_path, &destination_path)
+        .with_context(|| format!("Failed to finalize {}.", destination_path.display()))?;
+    Ok(destination_path)
+}
+
+fn whisper_runtime_source_url() -> String {
+    env::var("LECLOG_WHISPER_RUNTIME_URL").unwrap_or_else(|_| {
+        format!(
+            "{WHISPER_RUNTIME_REPOSITORY_BASE_URL}/{}",
+            whisper_runtime_file_name()
+        )
+    })
+}
+
+fn expected_whisper_runtime_sha256() -> Option<String> {
+    env::var("LECLOG_WHISPER_RUNTIME_SHA256")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_sha256_checksum(value: &str) -> Option<String> {
+    value
+        .split_whitespace()
+        .find(|part| {
+            part.len() == 64 && part.chars().all(|character| character.is_ascii_hexdigit())
+        })
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn fetch_whisper_runtime_sha256(client: &Client, source_url: &str) -> Result<String> {
+    if let Some(expected) = expected_whisper_runtime_sha256() {
+        return Ok(expected);
+    }
+
+    let checksum_url = format!("{source_url}.sha256");
+    let checksum_response = client
+        .get(&checksum_url)
+        .send()
+        .with_context(|| format!("Failed to download whisper-cli checksum from {checksum_url}."))?
+        .error_for_status()
+        .with_context(|| format!("The runtime server rejected {checksum_url}."))?;
+    let checksum_text = checksum_response
+        .text()
+        .context("Failed to read the runtime checksum response.")?;
+
+    parse_sha256_checksum(&checksum_text).with_context(|| {
+        format!("The runtime checksum response from {checksum_url} did not contain a SHA-256 hash.")
+    })
+}
+
+pub fn download_whisper_runtime<F>(app: &AppHandle, mut on_progress: F) -> Result<PathBuf>
+where
+    F: FnMut(u64, Option<u64>) -> Result<(), String>,
+{
+    let destination_path = managed_whisper_cli_path(app)?;
+    if destination_path.exists() {
+        return Ok(destination_path);
+    }
+
+    let runtime_dir = app_runtime_dir(app)?;
+    fs::create_dir_all(&runtime_dir).context("Failed to create the runtime directory.")?;
+    let temp_path = runtime_dir.join(format!("{}.part", whisper_runtime_file_name()));
+    if temp_path.exists() {
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    let source_url = whisper_runtime_source_url();
+    let client = Client::builder()
+        .build()
+        .context("Failed to initialize the HTTP client.")?;
+    let expected_sha256 = fetch_whisper_runtime_sha256(&client, &source_url)?;
+    let mut response = client
+        .get(&source_url)
+        .send()
+        .with_context(|| format!("Failed to download whisper-cli from {source_url}."))?
+        .error_for_status()
+        .with_context(|| format!("The runtime server rejected {source_url}."))?;
+
+    let total_bytes = response.content_length();
+    let mut file = fs::File::create(&temp_path)
+        .with_context(|| format!("Failed to create {}.", temp_path.display()))?;
+    let mut downloaded_bytes = 0u64;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = std::io::Read::read(&mut response, &mut buffer)
+            .context("Failed to read the runtime download stream.")?;
+        if read == 0 {
+            break;
+        }
+
+        file.write_all(&buffer[..read])
+            .context("Failed to write runtime bytes to disk.")?;
+        hasher.update(&buffer[..read]);
+        downloaded_bytes = downloaded_bytes.saturating_add(read as u64);
+        on_progress(downloaded_bytes, total_bytes).map_err(|error| anyhow::anyhow!(error))?;
+    }
+    drop(file);
+
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+    if actual_sha256 != expected_sha256 {
+        let _ = fs::remove_file(&temp_path);
+        anyhow::bail!(
+            "Downloaded whisper-cli did not match the expected checksum. Expected {expected_sha256}, got {actual_sha256}."
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&temp_path)
+            .with_context(|| format!("Failed to inspect {}.", temp_path.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&temp_path, permissions)
+            .with_context(|| format!("Failed to mark {} executable.", temp_path.display()))?;
     }
 
     fs::rename(&temp_path, &destination_path)

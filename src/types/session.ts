@@ -125,6 +125,7 @@ export type BackgroundTaskKind =
   | "finalTranscription"
   | "liveTranscription"
   | "modelDownload"
+  | "runtimeSetup"
   | "importMedia"
   | "cleanup";
 

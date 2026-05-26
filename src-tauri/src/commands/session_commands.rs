@@ -3,6 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -12,17 +13,20 @@ use uuid::Uuid;
 use crate::{
     models::{
         BackgroundTask, BackgroundTaskKind, CaptureSource, LectureSession,
-        ManagedTranscriptionModel, ProcessingQualityPreset, ProcessingSettings, ResourceItem,
-        ResourceKind, ResourceOverview, RuntimeStatus, SessionStatus, SessionSummary,
-        TranscriptPhase, TranscriptSegment, TranscriptionModelInfo,
+        ManagedTranscriptionModel, ModelDownloadStatus, ProcessingQualityPreset,
+        ProcessingSettings, ResourceItem, ResourceKind, ResourceOverview, RuntimeStatus,
+        SessionStatus, SessionSummary, TranscriptPhase, TranscriptSegment, TranscriptionModelInfo,
     },
     state::{
-        AudioMeterState, ModelDownloadState, SessionState, SystemAudioCaptureState,
-        TranscriptionTaskState,
+        AudioMeterState, ModelDownloadState, SessionState, SessionStorageSizeState,
+        SystemAudioCaptureState, TranscriptionTaskState,
     },
     storage,
     system_audio::SystemAudioCapture,
 };
+
+const ACTIVE_SESSION_SIZE_CACHE_TTL: Duration = Duration::from_secs(30);
+const STABLE_SESSION_SIZE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
@@ -110,6 +114,20 @@ fn summarize_session(
     }
 }
 
+fn session_size_cache_ttl(summary: &SessionSummary) -> Duration {
+    if matches!(
+        summary.status,
+        SessionStatus::Recording | SessionStatus::Paused | SessionStatus::Processing
+    ) || matches!(
+        summary.transcript_phase,
+        TranscriptPhase::Live | TranscriptPhase::Processing
+    ) {
+        return ACTIVE_SESSION_SIZE_CACHE_TTL;
+    }
+
+    STABLE_SESSION_SIZE_CACHE_TTL
+}
+
 fn finalize_active_duration(session: &mut LectureSession) -> Result<(), String> {
     let Some(last_resumed_at) = session.last_resumed_at.take() else {
         return Ok(());
@@ -187,6 +205,194 @@ fn mark_session_processing_interrupted(
     if changed {
         persist_snapshot(app, &snapshot)?;
     }
+    Ok(())
+}
+
+fn auto_download_model_candidate(app: &AppHandle) -> Result<ManagedTranscriptionModel, String> {
+    let downloads = app.state::<ModelDownloadState>();
+    let snapshot = downloads.snapshot()?;
+    storage::list_available_transcription_models(app, &snapshot)
+        .into_iter()
+        .find(|model| model.recommended)
+        .or_else(|| {
+            storage::list_available_transcription_models(app, &snapshot)
+                .into_iter()
+                .next()
+        })
+        .ok_or_else(|| String::from("No downloadable transcription model is configured."))
+}
+
+fn ensure_whisper_runtime_ready(app: &AppHandle, task_id: &str) -> Result<(), String> {
+    let whisper_cli_path = storage::resolve_whisper_cli_path(app);
+    if command_available(&whisper_cli_path, "--help") {
+        return Ok(());
+    }
+
+    let task_state = app.state::<TranscriptionTaskState>();
+    task_state
+        .progress_task(
+            task_id,
+            "Downloading speech engine",
+            2.0,
+            None,
+            None,
+            Some(0),
+            Some(None),
+        )
+        .ok();
+
+    let path = storage::download_whisper_runtime(app, |downloaded_bytes, total_bytes| {
+        let task_state = app.state::<TranscriptionTaskState>();
+        if task_state.is_canceled(task_id).unwrap_or(false) {
+            return Err(String::from("Task canceled."));
+        }
+        let percent = total_bytes
+            .filter(|total| *total > 0)
+            .map(|total| 2.0 + ((downloaded_bytes as f32 / total as f32) * 10.0).clamp(0.0, 10.0))
+            .unwrap_or(2.0);
+        task_state
+            .progress_task(
+                task_id,
+                "Downloading speech engine",
+                percent,
+                None,
+                None,
+                Some(downloaded_bytes),
+                Some(total_bytes),
+            )
+            .ok();
+        Ok(())
+    })
+    .map_err(|error| format!("Failed to download whisper-cli: {error}"))?;
+
+    if !command_available(&path, "--help") {
+        return Err(String::from(
+            "Downloaded whisper-cli could not be started. Reinstall the speech engine or use a Homebrew fallback.",
+        ));
+    }
+
+    task_state
+        .progress_task(task_id, "Speech engine ready", 12.0, None, None, None, None)
+        .ok();
+    Ok(())
+}
+
+fn ensure_transcription_model_ready(app: &AppHandle, task_id: &str) -> Result<(), String> {
+    if storage::list_transcription_models(app)
+        .map_err(|error| format!("Failed to inspect local transcription models: {error}"))?
+        .is_empty()
+    {
+        let catalog_entry = auto_download_model_candidate(app)?;
+        let model_id = catalog_entry.id.clone();
+        let task_state = app.state::<TranscriptionTaskState>();
+        let downloads = app.state::<ModelDownloadState>();
+
+        task_state
+            .progress_task(
+                task_id,
+                "Downloading transcription model",
+                12.0,
+                None,
+                None,
+                Some(0),
+                Some(catalog_entry.total_bytes),
+            )
+            .ok();
+
+        if !downloads.start(catalog_entry.clone())? {
+            loop {
+                if task_state.is_canceled(task_id).unwrap_or(false) {
+                    return Err(String::from("Task canceled."));
+                }
+                if storage::find_model_path_by_id(app, &model_id).is_some() {
+                    return Ok(());
+                }
+
+                let snapshot = downloads.snapshot()?;
+                if let Some(job) = snapshot.get(&model_id) {
+                    let percent = job
+                        .total_bytes
+                        .filter(|total| *total > 0)
+                        .map(|total| 12.0 + ((job.downloaded_bytes as f32 / total as f32) * 6.0))
+                        .unwrap_or(12.0);
+                    task_state
+                        .progress_task(
+                            task_id,
+                            "Waiting for transcription model",
+                            percent,
+                            None,
+                            None,
+                            Some(job.downloaded_bytes),
+                            Some(job.total_bytes),
+                        )
+                        .ok();
+                    if job.download_status == ModelDownloadStatus::Error {
+                        return Err(job.error.clone().unwrap_or_else(|| {
+                            String::from("Failed to download the transcription model.")
+                        }));
+                    }
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+
+        let download_result = storage::download_transcription_model(
+            app,
+            &model_id,
+            |downloaded_bytes, total_bytes| {
+                let task_state = app.state::<TranscriptionTaskState>();
+                if task_state.is_canceled(task_id).unwrap_or(false) {
+                    return Err(String::from("Task canceled."));
+                }
+                let percent = total_bytes
+                    .filter(|total| *total > 0)
+                    .map(|total| {
+                        12.0 + ((downloaded_bytes as f32 / total as f32) * 6.0).clamp(0.0, 6.0)
+                    })
+                    .unwrap_or(12.0);
+                task_state
+                    .progress_task(
+                        task_id,
+                        "Downloading transcription model",
+                        percent,
+                        None,
+                        None,
+                        Some(downloaded_bytes),
+                        Some(total_bytes),
+                    )
+                    .ok();
+                downloads.progress(&model_id, downloaded_bytes, total_bytes)
+            },
+        );
+
+        match download_result {
+            Ok(path) => {
+                let total_bytes = std::fs::metadata(&path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                downloads.complete(&model_id, path.display().to_string(), total_bytes)?;
+                task_state
+                    .progress_task(
+                        task_id,
+                        "Transcription model ready",
+                        18.0,
+                        None,
+                        None,
+                        Some(total_bytes),
+                        Some(Some(total_bytes)),
+                    )
+                    .ok();
+            }
+            Err(error) => {
+                let _ = downloads.fail(&model_id, error.to_string());
+                return Err(format!(
+                    "Failed to download the default transcription model: {error}"
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -275,10 +481,23 @@ pub(crate) fn spawn_final_transcription_job(
         let outcome = (|| -> Result<(), String> {
             let task_state = app_handle.state::<TranscriptionTaskState>();
             task_state
-                .start_task(&task_id, "Normalizing audio")
+                .start_task(&task_id, "Preparing transcription model")
                 .map_err(|error| format!("Failed to start transcription task: {error}"))?;
             task_state
-                .progress_task(&task_id, "Normalizing audio", 8.0, None, None, None, None)
+                .progress_task(
+                    &task_id,
+                    "Preparing transcription model",
+                    2.0,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .ok();
+            ensure_whisper_runtime_ready(&app_handle, &task_id)?;
+            ensure_transcription_model_ready(&app_handle, &task_id)?;
+            task_state
+                .progress_task(&task_id, "Normalizing audio", 18.0, None, None, None, None)
                 .ok();
             storage::normalize_audio_for_transcript(&app_handle, &processing, Some(&task_id))
                 .map_err(|error| format!("Failed to normalize the recorded audio: {error}"))?;
@@ -630,6 +849,7 @@ pub fn list_sessions(
 pub fn list_session_summaries(
     state: State<'_, SessionState>,
     audio_meter: State<'_, AudioMeterState>,
+    storage_sizes: State<'_, SessionStorageSizeState>,
 ) -> Result<Vec<SessionSummary>, String> {
     let mut summaries = state.read(|sessions| {
         Ok(sessions
@@ -637,23 +857,28 @@ pub fn list_session_summaries(
             .map(|session| {
                 (
                     summarize_session(session, Some(&audio_meter)),
+                    session.id.clone(),
                     session.session_dir.clone(),
                 )
             })
             .collect::<Vec<_>>())
     })?;
 
-    for (summary, session_dir) in &mut summaries {
-        summary.storage_bytes = session_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .map(|path| storage::path_size_bytes(&path).unwrap_or(0))
-            .unwrap_or(0);
+    for (summary, session_id, session_dir) in &mut summaries {
+        let refresh_after = session_size_cache_ttl(summary);
+        summary.storage_bytes =
+            storage_sizes.get_or_refresh(session_id, &summary.updated_at, refresh_after, || {
+                session_dir
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .map(|path| storage::path_size_bytes(&path).unwrap_or(0))
+                    .unwrap_or(0)
+            })?;
     }
 
     let mut summaries = summaries
         .into_iter()
-        .map(|(summary, _)| summary)
+        .map(|(summary, _, _)| summary)
         .collect::<Vec<_>>();
     summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     Ok(summaries)
@@ -826,6 +1051,49 @@ pub fn download_transcription_model(
                         &task_id,
                         error.to_string(),
                     );
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn prepare_transcription_runtime(
+    app: AppHandle,
+    tasks: State<'_, TranscriptionTaskState>,
+) -> Result<(), String> {
+    let task = tasks.create_task(
+        BackgroundTaskKind::RuntimeSetup,
+        String::from("Prepare transcription runtime"),
+        None,
+        None,
+        true,
+    )?;
+    let app_handle = app.clone();
+    let task_id = task.id.clone();
+
+    std::thread::spawn(move || {
+        let task_state = app_handle.state::<TranscriptionTaskState>();
+        let _ = task_state.start_task(&task_id, "Preparing speech engine");
+        let outcome = (|| -> Result<(), String> {
+            ensure_whisper_runtime_ready(&app_handle, &task_id)?;
+            ensure_transcription_model_ready(&app_handle, &task_id)?;
+            Ok(())
+        })();
+
+        match outcome {
+            Ok(()) => {
+                let _ = task_state.succeed_task(&task_id, "Runtime ready");
+            }
+            Err(error) => {
+                if task_state.is_canceled(&task_id).unwrap_or(false)
+                    || error.to_ascii_lowercase().contains("canceled")
+                {
+                    let _ = task_state.cancel_task(&task_id);
+                } else {
+                    fail_task_with_persisted_log(&app_handle, &task_state, &task_id, error);
                 }
             }
         }
@@ -1467,10 +1735,6 @@ pub fn save_session(
 }
 
 fn command_available(path: &Path, help_arg: &str) -> bool {
-    if path.exists() {
-        return true;
-    }
-
     Command::new(path)
         .arg(help_arg)
         .stdin(Stdio::null())
@@ -1686,6 +1950,136 @@ fn clear_deleted_session_resource(session: &mut LectureSession, path: &Path) -> 
     matched
 }
 
+fn delete_app_file_if_exists(app: &AppHandle, path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if !storage::is_inside_app_data(app, path)
+        .map_err(|error| format!("Failed to validate intermediate path: {error}"))?
+    {
+        return Err(String::from(
+            "Only Leclog app intermediate files can be deleted.",
+        ));
+    }
+    if !path.is_file() {
+        return Ok(false);
+    }
+    fs::remove_file(path).map_err(|error| {
+        format!(
+            "Failed to delete intermediate file {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn delete_app_dir_if_exists(app: &AppHandle, path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if !storage::is_inside_app_data(app, path)
+        .map_err(|error| format!("Failed to validate intermediate path: {error}"))?
+    {
+        return Err(String::from(
+            "Only Leclog app intermediate directories can be deleted.",
+        ));
+    }
+    if !path.is_dir() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(path).map_err(|error| {
+        format!(
+            "Failed to delete intermediate directory {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn cleanup_session_intermediates(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    storage_sizes: State<'_, SessionStorageSizeState>,
+    session_id: String,
+) -> Result<LectureSession, String> {
+    let session = state
+        .clone_sessions()?
+        .into_iter()
+        .find(|candidate| candidate.id == session_id)
+        .ok_or_else(|| format!("Session with id {session_id} was not found."))?;
+
+    if session.status == SessionStatus::Recording
+        || session.transcript_phase == TranscriptPhase::Processing
+    {
+        return Err(String::from(
+            "Pause recording or wait for processing to finish before clearing generated files.",
+        ));
+    }
+
+    let session_dir = if let Some(session_dir) = session.session_dir.as_ref() {
+        PathBuf::from(session_dir)
+    } else {
+        storage::session_dir_path(&app, &session_id)
+            .map_err(|error| format!("Failed to resolve session directory: {error}"))?
+    };
+    if !storage::is_inside_app_data(&app, &session_dir)
+        .map_err(|error| format!("Failed to validate session directory: {error}"))?
+    {
+        return Err(String::from(
+            "Only Leclog app session intermediates can be deleted.",
+        ));
+    }
+
+    let mut removed_any = false;
+    for path in [
+        session.normalized_audio_path.as_ref(),
+        session.live_preview_audio_path.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        removed_any |= delete_app_file_if_exists(&app, &PathBuf::from(path))?;
+    }
+
+    let processed_dir = session_dir.join("processed");
+    for file_name in [
+        "transcript.json",
+        "live-transcript.json",
+        "live-transcript-window.wav",
+        "concat-inputs.txt",
+    ] {
+        removed_any |= delete_app_file_if_exists(&app, &processed_dir.join(file_name))?;
+    }
+    removed_any |= delete_app_dir_if_exists(&app, &processed_dir.join("chunks"))?;
+
+    let ((updated, changed), snapshot) = state.mutate(|sessions| {
+        let session = sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session_id)
+            .ok_or_else(|| String::from("Session not found."))?;
+        let had_normalized_audio = session.normalized_audio_path.take().is_some();
+        let had_live_preview_audio = session.live_preview_audio_path.take().is_some();
+        let had_live_preview_sample_rate = session.live_preview_sample_rate.take().is_some();
+        if had_normalized_audio
+            || had_live_preview_audio
+            || had_live_preview_sample_rate
+            || removed_any
+        {
+            session.updated_at = now_iso();
+            return Ok((session.clone(), true));
+        }
+
+        Ok((session.clone(), false))
+    })?;
+    if changed {
+        persist_snapshot(&app, &snapshot)?;
+    }
+    let _ = storage_sizes.invalidate(&session_id);
+
+    Ok(present_session(&updated))
+}
+
 #[tauri::command]
 pub fn delete_session(
     app: AppHandle,
@@ -1693,6 +2087,7 @@ pub fn delete_session(
     tasks: State<'_, TranscriptionTaskState>,
     capture_state: State<'_, SystemAudioCaptureState>,
     audio_meter: State<'_, AudioMeterState>,
+    storage_sizes: State<'_, SessionStorageSizeState>,
     session_id: String,
 ) -> Result<(), String> {
     let session = state
@@ -1721,6 +2116,7 @@ pub fn delete_session(
     let _ = tasks.cancel_session_tasks(&session_id);
     let _ = capture_state.remove(&session_id);
     let _ = audio_meter.remove(&session_id);
+    let _ = storage_sizes.invalidate(&session_id);
     let _ = storage::clear_session_task_failure(&app, &session_id);
 
     if session_dir.exists() {
@@ -1909,6 +2305,7 @@ pub fn delete_resource(
     app: AppHandle,
     state: State<'_, SessionState>,
     downloads: State<'_, ModelDownloadState>,
+    storage_sizes: State<'_, SessionStorageSizeState>,
     path: String,
     session_id: Option<String>,
     model_id: Option<String>,
@@ -1944,6 +2341,7 @@ pub fn delete_resource(
                 Ok(())
             })?;
             persist_snapshot(&app, &snapshot)?;
+            let _ = storage_sizes.invalidate(session_id);
         } else {
             let canonical_session_dir = expected_session_dir
                 .canonicalize()
@@ -1979,6 +2377,7 @@ pub fn delete_resource(
                 Ok(())
             })?;
             persist_snapshot(&app, &snapshot)?;
+            let _ = storage_sizes.invalidate(session_id);
         }
     } else if path.exists() && path.is_file() {
         fs::remove_file(&path).map_err(|error| format!("Failed to delete resource: {error}"))?;

@@ -92,6 +92,8 @@ const presetLabels: Record<ProcessingQualityPreset, string> = {
   custom: "Custom",
 };
 
+type CreationMode = "capture" | "import";
+
 function getModelLabel(
   modelId: string | null | undefined,
   models: ManagedTranscriptionModel[],
@@ -330,6 +332,7 @@ export function SessionListPage() {
   const [draftTitle, setDraftTitle] = useState("");
   const [draftCaptureSource, setDraftCaptureSource] =
     useState<CaptureSource>("microphone");
+  const [creationMode, setCreationMode] = useState<CreationMode>("capture");
   const [isStarting, setIsStarting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isImportDragActive, setIsImportDragActive] = useState(false);
@@ -400,6 +403,7 @@ export function SessionListPage() {
         }
 
         if (event.payload.type === "enter" || event.payload.type === "over") {
+          setCreationMode("import");
           setIsImportDragActive(true);
           return;
         }
@@ -410,6 +414,7 @@ export function SessionListPage() {
         }
 
         if (event.payload.type === "drop") {
+          setCreationMode("import");
           setIsImportDragActive(false);
           const paths = event.payload.paths.filter((path) => path.trim().length > 0);
           if (paths.length === 0) {
@@ -535,152 +540,183 @@ export function SessionListPage() {
 
       <RuntimeSetupPanel />
 
-      <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.58fr)]">
-        <form
-          className="flex min-h-full flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
-          onSubmit={handleStartSession}
+      <section className="grid gap-1.5 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <Label className="text-xs font-medium text-slate-600">Transcription</Label>
+        <button
+          type="button"
+          className="grid min-w-0 gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-left transition-colors hover:border-slate-400 hover:bg-white"
+          onClick={openTranscriptionSettingsDialog}
         >
-          <div className="grid gap-2">
-            <div className="min-w-0 space-y-1.5">
-              <Label htmlFor="session-title" className="text-xs font-medium text-slate-600">
-                Session title
-              </Label>
-              <Input
-                id="session-title"
-                value={draftTitle}
-                onChange={(event) => {
-                  const nextTitle = event.target.value;
-                  setDraftTitle(nextTitle);
-                  void updateRecentState({ draftTitle: nextTitle });
-                }}
-                placeholder="2026-04-22 14:30"
-                className="h-10 rounded-lg border-slate-300 bg-white text-base"
-              />
-            </div>
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label className="text-xs font-medium text-slate-600">Source</Label>
-            <RadioGroup
-              value={draftCaptureSource}
-              onValueChange={(value) => {
-                const nextValue = value as CaptureSource;
-                setDraftCaptureSource(nextValue);
-                void updateRecentState({ draftCaptureSource: nextValue });
-              }}
-              className="grid gap-2 sm:grid-cols-2"
-            >
-              <SourceOption
-                value="microphone"
-                title="Microphone"
-                description="Record live lecture notes with the local recorder."
-                selectedValue={draftCaptureSource}
-                onSelect={(value) => {
-                  setDraftCaptureSource(value);
-                  void updateRecentState({ draftCaptureSource: value });
-                }}
-              />
-              <SourceOption
-                value="systemAudio"
-                title="System audio"
-                description="Capture a browser window, app, or display using the native picker."
-                selectedValue={draftCaptureSource}
-                onSelect={(value) => {
-                  setDraftCaptureSource(value);
-                  void updateRecentState({ draftCaptureSource: value });
-                }}
-              />
-            </RadioGroup>
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label className="text-xs font-medium text-slate-600">Transcription</Label>
-            <button
-              type="button"
-              className="grid min-w-0 gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-left transition-colors hover:border-slate-400 hover:bg-white"
-              onClick={openTranscriptionSettingsDialog}
-            >
-              <span className="flex min-w-0 items-center gap-3">
-                <span className="rounded-lg border border-blue-100 bg-blue-50 p-2 text-blue-700">
-                  <Settings2 className="size-4" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-semibold text-slate-950">
-                    Model, settings, and prompt
-                  </span>
-                  <span className="block truncate text-xs text-slate-500">
-                    {modelSummary} · {presetLabels[draftProcessingSettings.qualityPreset]} · {getLanguageLabel(draftProcessingSettings.language)}
-                  </span>
-                </span>
-                <span className="shrink-0 text-xs font-semibold text-blue-700">Edit</span>
+          <span className="flex min-w-0 items-center gap-3">
+            <span className="rounded-lg border border-blue-100 bg-blue-50 p-2 text-blue-700">
+              <Settings2 className="size-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-semibold text-slate-950">
+                Model, settings, and prompt
               </span>
-              <span className="flex min-w-0 items-center gap-2 rounded-md bg-white px-2.5 py-2 text-xs text-slate-600 ring-1 ring-slate-200">
-                <MessageSquareText className="size-3.5 shrink-0 text-slate-500" />
-                <span className="truncate">
-                  {promptSummary ? `Prompt: ${promptSummary}` : "No prompt terms for this session."}
-                </span>
+              <span className="block truncate text-xs text-slate-500">
+                {modelSummary} · {presetLabels[draftProcessingSettings.qualityPreset]} · {getLanguageLabel(draftProcessingSettings.language)}
               </span>
-            </button>
-          </div>
+            </span>
+            <span className="shrink-0 text-xs font-semibold text-blue-700">Edit</span>
+          </span>
+          <span className="flex min-w-0 items-center gap-2 rounded-md bg-white px-2.5 py-2 text-xs text-slate-600 ring-1 ring-slate-200">
+            <MessageSquareText className="size-3.5 shrink-0 text-slate-500" />
+            <span className="truncate">
+              {promptSummary ? `Prompt: ${promptSummary}` : "No prompt terms for this session."}
+            </span>
+          </span>
+        </button>
+      </section>
 
-          <div className="mt-auto flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center">
-            <Button
-              type="submit"
-              size="lg"
-              className="h-12 flex-1 justify-center rounded-lg bg-blue-600 px-4 text-base font-semibold text-white shadow-sm shadow-blue-900/15 hover:bg-blue-700 focus-visible:border-blue-500 focus-visible:ring-blue-500/25"
-            >
-              <Play className="size-5" />
-              {isStarting ? "Starting..." : "Start recording"}
-            </Button>
-
-            {activeSession ? (
-              <Button
+      <div className="flex min-w-0" role="tablist" aria-label="Session creation mode">
+        <div className="inline-flex min-w-0 rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
+          {[
+            { value: "capture" as const, label: "Capture", icon: Play },
+            { value: "import" as const, label: "Import", icon: Import },
+          ].map((item) => {
+            const Icon = item.icon;
+            const selected = creationMode === item.value;
+            return (
+              <button
+                key={item.value}
                 type="button"
-                variant="outline"
-                size="lg"
-                className="h-12 justify-center px-4"
-                onClick={() => navigate(`/recording/${activeSession.id}`)}
+                role="tab"
+                aria-selected={selected}
+                className={[
+                  "flex h-8 min-w-28 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors",
+                  selected
+                    ? "bg-slate-950 text-white shadow-sm [&_svg]:text-white"
+                    : "text-slate-500 hover:bg-slate-50 hover:text-slate-900",
+                ].join(" ")}
+                onClick={() => setCreationMode(item.value)}
               >
-                <ArrowUpRight className="size-4" />
-                Reopen active
-              </Button>
-            ) : null}
-          </div>
-        </form>
-
-        <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <h3 className="truncate text-sm font-semibold text-slate-950">Import media</h3>
-              <p
-                className="truncate text-xs text-slate-500"
-                title="Drop audio or video files to create transcript-only sessions."
-              >
-                Drag audio/video files here
-              </p>
-            </div>
-            <Import className="size-4 text-slate-500" />
-          </div>
-
-          <div
-            className={[
-              "grid min-h-24 place-items-center rounded-lg border border-dashed px-4 py-4 text-center transition-colors",
-              isImportDragActive
-                ? "border-slate-900 bg-slate-950 text-white"
-                : "border-slate-300 bg-white text-slate-950",
-            ].join(" ")}
-          >
-            <div className="space-y-1">
-              <p className="text-sm font-medium">
-                {isImporting ? "Importing media..." : "Drop files here"}
-              </p>
-              <p className={isImportDragActive ? "text-xs text-slate-300" : "text-xs text-slate-500"}>
-                Normalize and transcribe in the background.
-              </p>
-            </div>
-          </div>
+                <Icon className="size-4 shrink-0" />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
+
+      <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="min-w-0 p-4">
+            {creationMode === "capture" ? (
+              <form className="flex flex-col gap-4" onSubmit={handleStartSession}>
+                <div className="grid gap-2">
+                  <div className="min-w-0 space-y-1.5">
+                    <Label htmlFor="session-title" className="text-xs font-medium text-slate-600">
+                      Session title
+                    </Label>
+                    <Input
+                      id="session-title"
+                      value={draftTitle}
+                      onChange={(event) => {
+                        const nextTitle = event.target.value;
+                        setDraftTitle(nextTitle);
+                        void updateRecentState({ draftTitle: nextTitle });
+                      }}
+                      placeholder="2026-04-22 14:30"
+                      className="h-10 rounded-lg border-slate-300 bg-white text-base"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-medium text-slate-600">Source</Label>
+                  <RadioGroup
+                    value={draftCaptureSource}
+                    onValueChange={(value) => {
+                      const nextValue = value as CaptureSource;
+                      setDraftCaptureSource(nextValue);
+                      void updateRecentState({ draftCaptureSource: nextValue });
+                    }}
+                    className="grid gap-2 sm:grid-cols-2"
+                  >
+                    <SourceOption
+                      value="microphone"
+                      title="Microphone"
+                      description="Record live lecture notes with the local recorder."
+                      selectedValue={draftCaptureSource}
+                      onSelect={(value) => {
+                        setDraftCaptureSource(value);
+                        void updateRecentState({ draftCaptureSource: value });
+                      }}
+                    />
+                    <SourceOption
+                      value="systemAudio"
+                      title="System audio"
+                      description="Capture a browser window, app, or display using the native picker."
+                      selectedValue={draftCaptureSource}
+                      onSelect={(value) => {
+                        setDraftCaptureSource(value);
+                        void updateRecentState({ draftCaptureSource: value });
+                      }}
+                    />
+                  </RadioGroup>
+                </div>
+
+                <div className="mt-auto flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center">
+                  <Button
+                    type="submit"
+                    size="lg"
+                    className="h-12 flex-1 justify-center rounded-lg bg-blue-600 px-4 text-base font-semibold text-white shadow-sm shadow-blue-900/15 hover:bg-blue-700 focus-visible:border-blue-500 focus-visible:ring-blue-500/25"
+                  >
+                    <Play className="size-5" />
+                    {isStarting ? "Starting..." : "Start recording"}
+                  </Button>
+
+                  {activeSession ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="lg"
+                      className="h-12 justify-center px-4"
+                      onClick={() => navigate(`/recording/${activeSession.id}`)}
+                    >
+                      <ArrowUpRight className="size-4" />
+                      Reopen active
+                    </Button>
+                  ) : null}
+                </div>
+              </form>
+            ) : (
+              <div className="grid content-start gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="truncate text-sm font-semibold text-slate-950">Import media</h3>
+                    <p
+                      className="truncate text-xs text-slate-500"
+                      title="Drop audio or video files to create transcript-only sessions."
+                    >
+                      Drag audio/video files here
+                    </p>
+                  </div>
+                  <Import className="size-4 text-slate-500" />
+                </div>
+
+                <div
+                  className={[
+                    "grid min-h-48 place-items-center rounded-lg border border-dashed px-4 py-6 text-center transition-colors",
+                    isImportDragActive
+                      ? "border-slate-900 bg-slate-950 text-white"
+                      : "border-slate-300 bg-white text-slate-950",
+                  ].join(" ")}
+                >
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium">
+                      {isImporting ? "Importing media..." : "Drop files here"}
+                    </p>
+                    <p className={isImportDragActive ? "text-xs text-slate-300" : "text-xs text-slate-500"}>
+                      Normalize and transcribe in the background.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+        </div>
+      </section>
 
       <TranscriptionSettingsDialog
         open={isSettingsDialogOpen}
