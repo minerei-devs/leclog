@@ -9,6 +9,7 @@ import { getSessionHref } from "@/lib/session";
 import { buildDefaultDraftTitle } from "@/lib/store";
 import {
   createSession,
+  getPlatformCapabilities,
   importMediaSession,
   listAvailableTranscriptionModels,
   listSessionSummaries,
@@ -24,6 +25,7 @@ import type {
   CaptureSource,
   LectureSession,
   ManagedTranscriptionModel,
+  PlatformCapabilities,
   ProcessingQualityPreset,
   ProcessingSettings,
   SessionSummary,
@@ -93,6 +95,13 @@ const presetLabels: Record<ProcessingQualityPreset, string> = {
 };
 
 type CreationMode = "capture" | "import";
+
+const DEFAULT_PLATFORM_CAPABILITIES: PlatformCapabilities = {
+  platform: "unknown",
+  importMedia: true,
+  microphoneCapture: false,
+  systemAudioCapture: false,
+};
 
 function getModelLabel(
   modelId: string | null | undefined,
@@ -329,6 +338,9 @@ export function SessionListPage() {
     useState<TranscriptionLanguageProfileId>(
     () => getLanguageProfileId(processingSettings.language),
   );
+  const [platformCapabilities, setPlatformCapabilities] = useState<PlatformCapabilities>(
+    DEFAULT_PLATFORM_CAPABILITIES,
+  );
   const [draftTitle, setDraftTitle] = useState("");
   const [draftCaptureSource, setDraftCaptureSource] =
     useState<CaptureSource>("microphone");
@@ -345,6 +357,20 @@ export function SessionListPage() {
 
   useEffect(() => {
     void listAvailableTranscriptionModels().then(setModels).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    void getPlatformCapabilities()
+      .then((capabilities) => {
+        if (isMounted) {
+          setPlatformCapabilities(capabilities);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -403,7 +429,9 @@ export function SessionListPage() {
         }
 
         if (event.payload.type === "enter" || event.payload.type === "over") {
-          setCreationMode("import");
+          if (platformCapabilities.importMedia) {
+            setCreationMode("import");
+          }
           setIsImportDragActive(true);
           return;
         }
@@ -414,7 +442,9 @@ export function SessionListPage() {
         }
 
         if (event.payload.type === "drop") {
-          setCreationMode("import");
+          if (platformCapabilities.importMedia) {
+            setCreationMode("import");
+          }
           setIsImportDragActive(false);
           const paths = event.payload.paths.filter((path) => path.trim().length > 0);
           if (paths.length === 0) {
@@ -460,7 +490,7 @@ export function SessionListPage() {
       isMounted = false;
       unlisten?.();
     };
-  }, [draftProcessingSettings, navigate]);
+  }, [draftProcessingSettings, navigate, platformCapabilities.importMedia]);
 
   async function handleStartSession(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -468,9 +498,12 @@ export function SessionListPage() {
     setIsStarting(true);
 
     try {
+      if (!canCapture) {
+        throw new Error("Recording is not available on this platform yet. Import media instead.");
+      }
       const created = await createSession(
         draftTitle,
-        draftCaptureSource,
+        resolvedCaptureSource,
         draftProcessingSettings,
       );
       const recording = await startSessionRecording(created.id);
@@ -478,7 +511,7 @@ export function SessionListPage() {
       await updateRecentState({
         activeSessionId: recording.id,
         draftTitle: nextDefaultTitle,
-        draftCaptureSource,
+        draftCaptureSource: resolvedCaptureSource,
         lastViewedSessionId: recording.id,
       });
       navigate(`/recording/${recording.id}`);
@@ -524,6 +557,41 @@ export function SessionListPage() {
 
   const promptSummary = draftProcessingSettings.promptTerms.trim();
   const modelSummary = getModelLabel(draftProcessingSettings.preferredModelId, models);
+  const canCapture =
+    platformCapabilities.microphoneCapture || platformCapabilities.systemAudioCapture;
+  const modeOptions = [
+    ...(canCapture ? [{ value: "capture" as const, label: "Capture", icon: Play }] : []),
+    ...(platformCapabilities.importMedia
+      ? [{ value: "import" as const, label: "Import", icon: Import }]
+      : []),
+  ];
+  const showModeSwitcher = modeOptions.length > 1;
+  const resolvedCreationMode =
+    creationMode === "capture" && !canCapture ? "import" : creationMode;
+  const availableSources = [
+    ...(platformCapabilities.microphoneCapture
+      ? [
+          {
+            value: "microphone" as const,
+            title: "Microphone",
+            description: "Record live lecture notes with the local recorder.",
+          },
+        ]
+      : []),
+    ...(platformCapabilities.systemAudioCapture
+      ? [
+          {
+            value: "systemAudio" as const,
+            title: "System audio",
+            description: "Capture a browser window, app, or display using the native picker.",
+          },
+        ]
+      : []),
+  ];
+  const resolvedCaptureSource =
+    availableSources.some((source) => source.value === draftCaptureSource)
+      ? draftCaptureSource
+      : availableSources[0]?.value ?? "microphone";
 
   return (
     <section className="grid gap-3">
@@ -570,151 +638,147 @@ export function SessionListPage() {
         </button>
       </section>
 
-      <div className="flex min-w-0" role="tablist" aria-label="Session creation mode">
-        <div className="inline-flex min-w-0 rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
-          {[
-            { value: "capture" as const, label: "Capture", icon: Play },
-            { value: "import" as const, label: "Import", icon: Import },
-          ].map((item) => {
-            const Icon = item.icon;
-            const selected = creationMode === item.value;
-            return (
-              <button
-                key={item.value}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                className={[
-                  "flex h-8 min-w-28 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors",
-                  selected
-                    ? "bg-slate-950 text-white shadow-sm [&_svg]:text-white"
-                    : "text-slate-500 hover:bg-slate-50 hover:text-slate-900",
-                ].join(" ")}
-                onClick={() => setCreationMode(item.value)}
-              >
-                <Icon className="size-4 shrink-0" />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
+      {showModeSwitcher ? (
+        <div className="flex min-w-0" role="tablist" aria-label="Session creation mode">
+          <div className="inline-flex min-w-0 rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
+            {modeOptions.map((item) => {
+              const Icon = item.icon;
+              const selected = resolvedCreationMode === item.value;
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  className={[
+                    "flex h-8 min-w-28 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors",
+                    selected
+                      ? "bg-slate-950 text-white shadow-sm [&_svg]:text-white"
+                      : "text-slate-500 hover:bg-slate-50 hover:text-slate-900",
+                  ].join(" ")}
+                  onClick={() => setCreationMode(item.value)}
+                >
+                  <Icon className="size-4 shrink-0" />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      ) : null}
 
       <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
         <div className="min-w-0 p-4">
-            {creationMode === "capture" ? (
-              <form className="flex flex-col gap-4" onSubmit={handleStartSession}>
-                <div className="grid gap-2">
-                  <div className="min-w-0 space-y-1.5">
-                    <Label htmlFor="session-title" className="text-xs font-medium text-slate-600">
-                      Session title
-                    </Label>
-                    <Input
-                      id="session-title"
-                      value={draftTitle}
-                      onChange={(event) => {
-                        const nextTitle = event.target.value;
-                        setDraftTitle(nextTitle);
-                        void updateRecentState({ draftTitle: nextTitle });
-                      }}
-                      placeholder="2026-04-22 14:30"
-                      className="h-10 rounded-lg border-slate-300 bg-white text-base"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid gap-1.5">
-                  <Label className="text-xs font-medium text-slate-600">Source</Label>
-                  <RadioGroup
-                    value={draftCaptureSource}
-                    onValueChange={(value) => {
-                      const nextValue = value as CaptureSource;
-                      setDraftCaptureSource(nextValue);
-                      void updateRecentState({ draftCaptureSource: nextValue });
+          {resolvedCreationMode === "capture" ? (
+            <form className="flex flex-col gap-4" onSubmit={handleStartSession}>
+              <div className="grid gap-2">
+                <div className="min-w-0 space-y-1.5">
+                  <Label htmlFor="session-title" className="text-xs font-medium text-slate-600">
+                    Session title
+                  </Label>
+                  <Input
+                    id="session-title"
+                    value={draftTitle}
+                    onChange={(event) => {
+                      const nextTitle = event.target.value;
+                      setDraftTitle(nextTitle);
+                      void updateRecentState({ draftTitle: nextTitle });
                     }}
-                    className="grid gap-2 sm:grid-cols-2"
-                  >
-                    <SourceOption
-                      value="microphone"
-                      title="Microphone"
-                      description="Record live lecture notes with the local recorder."
-                      selectedValue={draftCaptureSource}
-                      onSelect={(value) => {
-                        setDraftCaptureSource(value);
-                        void updateRecentState({ draftCaptureSource: value });
-                      }}
-                    />
-                    <SourceOption
-                      value="systemAudio"
-                      title="System audio"
-                      description="Capture a browser window, app, or display using the native picker."
-                      selectedValue={draftCaptureSource}
-                      onSelect={(value) => {
-                        setDraftCaptureSource(value);
-                        void updateRecentState({ draftCaptureSource: value });
-                      }}
-                    />
-                  </RadioGroup>
-                </div>
-
-                <div className="mt-auto flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center">
-                  <Button
-                    type="submit"
-                    size="lg"
-                    className="h-12 flex-1 justify-center rounded-lg bg-blue-600 px-4 text-base font-semibold text-white shadow-sm shadow-blue-900/15 hover:bg-blue-700 focus-visible:border-blue-500 focus-visible:ring-blue-500/25"
-                  >
-                    <Play className="size-5" />
-                    {isStarting ? "Starting..." : "Start recording"}
-                  </Button>
-
-                  {activeSession ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="lg"
-                      className="h-12 justify-center px-4"
-                      onClick={() => navigate(`/recording/${activeSession.id}`)}
-                    >
-                      <ArrowUpRight className="size-4" />
-                      Reopen active
-                    </Button>
-                  ) : null}
-                </div>
-              </form>
-            ) : (
-              <div className="grid content-start gap-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <h3 className="truncate text-sm font-semibold text-slate-950">Import media</h3>
-                    <p
-                      className="truncate text-xs text-slate-500"
-                      title="Drop audio or video files to create transcript-only sessions."
-                    >
-                      Drag audio/video files here
-                    </p>
-                  </div>
-                  <Import className="size-4 text-slate-500" />
-                </div>
-
-                <div
-                  className={[
-                    "grid min-h-48 place-items-center rounded-lg border border-dashed px-4 py-6 text-center transition-colors",
-                    isImportDragActive
-                      ? "border-slate-900 bg-slate-950 text-white"
-                      : "border-slate-300 bg-white text-slate-950",
-                  ].join(" ")}
-                >
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium">
-                      {isImporting ? "Importing media..." : "Drop files here"}
-                    </p>
-                    <p className={isImportDragActive ? "text-xs text-slate-300" : "text-xs text-slate-500"}>
-                      Normalize and transcribe in the background.
-                    </p>
-                  </div>
+                    placeholder="2026-04-22 14:30"
+                    className="h-10 rounded-lg border-slate-300 bg-white text-base"
+                  />
                 </div>
               </div>
-            )}
+
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-medium text-slate-600">Source</Label>
+                <RadioGroup
+                  value={resolvedCaptureSource}
+                  onValueChange={(value) => {
+                    const nextValue = value as CaptureSource;
+                    setDraftCaptureSource(nextValue);
+                    void updateRecentState({ draftCaptureSource: nextValue });
+                  }}
+                  className="grid gap-2 sm:grid-cols-2"
+                >
+                  {availableSources.map((source) => (
+                    <SourceOption
+                      key={source.value}
+                      value={source.value}
+                      title={source.title}
+                      description={source.description}
+                      selectedValue={resolvedCaptureSource}
+                      onSelect={(value) => {
+                        setDraftCaptureSource(value);
+                        void updateRecentState({ draftCaptureSource: value });
+                      }}
+                    />
+                  ))}
+                </RadioGroup>
+              </div>
+
+              <div className="mt-auto flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center">
+                <Button
+                  type="submit"
+                  size="lg"
+                  className="h-12 flex-1 justify-center rounded-lg bg-blue-600 px-4 text-base font-semibold text-white shadow-sm shadow-blue-900/15 hover:bg-blue-700 focus-visible:border-blue-500 focus-visible:ring-blue-500/25"
+                >
+                  <Play className="size-5" />
+                  {isStarting ? "Starting..." : "Start recording"}
+                </Button>
+
+                {activeSession ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="lg"
+                    className="h-12 justify-center px-4"
+                    onClick={() => navigate(`/recording/${activeSession.id}`)}
+                  >
+                    <ArrowUpRight className="size-4" />
+                    Reopen active
+                  </Button>
+                ) : null}
+              </div>
+            </form>
+          ) : (
+            <div className="grid content-start gap-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="truncate text-sm font-semibold text-slate-950">Import media</h3>
+                  <p
+                    className="truncate text-xs text-slate-500"
+                    title="Drop audio or video files to create transcript-only sessions."
+                  >
+                    Drag audio/video files here
+                  </p>
+                </div>
+                <Import className="size-4 text-slate-500" />
+              </div>
+
+              <div
+                className={[
+                  "grid min-h-48 place-items-center rounded-lg border border-dashed px-4 py-6 text-center transition-colors",
+                  isImportDragActive
+                    ? "border-slate-900 bg-slate-950 text-white"
+                    : "border-slate-300 bg-white text-slate-950",
+                ].join(" ")}
+              >
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">
+                    {isImporting ? "Importing media..." : "Drop files here"}
+                  </p>
+                  <p
+                    className={
+                      isImportDragActive ? "text-xs text-slate-300" : "text-xs text-slate-500"
+                    }
+                  >
+                    Normalize and transcribe in the background.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </section>
 

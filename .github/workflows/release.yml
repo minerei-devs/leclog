@@ -33,6 +33,7 @@ jobs:
     runs-on: macos-latest
     env:
       CI: true
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       WHISPER_CPP_TAG: v1.8.4
 
     steps:
@@ -47,7 +48,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install Rust stable
@@ -295,4 +296,174 @@ jobs:
             "${work_dir}/Leclog_aarch64.app.tar.gz.sig" \
             latest.json \
             --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+  publish-windows:
+    needs: publish-tauri
+    runs-on: windows-latest
+    env:
+      CI: true
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      WHISPER_CPP_TAG: v1.8.4
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag_name }}"
+            $releaseName = "${{ inputs.release_name }}"
+            $draft = "${{ inputs.draft }}"
+          } else {
+            $tag = "${env:GITHUB_REF_NAME}"
+            $releaseName = ""
+            $draft = "false"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($releaseName)) {
+            $releaseName = "Leclog $tag"
+          }
+
+          $prerelease = if ($tag.Contains("-")) { "true" } else { "false" }
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          "draft=$draft" >> $env:GITHUB_OUTPUT
+          "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $tagVersion = "${{ steps.meta.outputs.tag }}" -replace "^v", ""
+          $packageVersion = node -p "require('./package.json').version"
+          $tauriVersion = node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json', 'utf8')).version"
+          $cargoVersion = Select-String -Path "src-tauri/Cargo.toml" -Pattern '^version = "(.+)"' |
+            Select-Object -First 1 |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+
+          if ($packageVersion -ne $tagVersion -or $tauriVersion -ne $tagVersion -or $cargoVersion -ne $tagVersion) {
+            Write-Error "Release tag does not match versioned files. tag: $tagVersion, package.json: $packageVersion, src-tauri/tauri.conf.json: $tauriVersion, src-tauri/Cargo.toml: $cargoVersion"
+            exit 1
+          }
+
+      - name: Build and stage Windows runtimes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $targetTriple = "x86_64-pc-windows-msvc"
+          $workDir = Join-Path $env:RUNNER_TEMP "windows-runtime"
+          $artifactDir = Join-Path $env:RUNNER_TEMP "windows-runtime-artifacts"
+          Remove-Item -Recurse -Force $workDir, $artifactDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $workDir, $artifactDir | Out-Null
+
+          $ffmpegZip = Join-Path $workDir "ffmpeg-release-essentials.zip"
+          $ffmpegExtractDir = Join-Path $workDir "ffmpeg"
+          Invoke-WebRequest `
+            -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
+            -OutFile $ffmpegZip
+          Expand-Archive -Path $ffmpegZip -DestinationPath $ffmpegExtractDir
+          $ffmpegExe = Get-ChildItem -Path $ffmpegExtractDir -Recurse -Filter "ffmpeg.exe" |
+            Select-Object -First 1
+          if (-not $ffmpegExe) {
+            throw "ffmpeg.exe was not found in the downloaded archive."
+          }
+          Copy-Item $ffmpegExe.FullName "src-tauri/binaries/ffmpeg-$targetTriple.exe"
+
+          git clone `
+            --depth 1 `
+            --branch $env:WHISPER_CPP_TAG `
+            https://github.com/ggml-org/whisper.cpp.git `
+            "$workDir/whisper.cpp"
+
+          cmake `
+            -S "$workDir/whisper.cpp" `
+            -B "$workDir/build" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DWHISPER_BUILD_TESTS=OFF `
+            -DWHISPER_BUILD_SERVER=OFF
+
+          cmake `
+            --build "$workDir/build" `
+            --config Release `
+            --target whisper-cli `
+            --parallel $env:NUMBER_OF_PROCESSORS
+
+          $whisperExe = Get-ChildItem -Path "$workDir/build" -Recurse -Filter "whisper-cli.exe" |
+            Select-Object -First 1
+          if (-not $whisperExe) {
+            throw "whisper-cli.exe was not found after building whisper.cpp."
+          }
+
+          $runtimeAsset = Join-Path $artifactDir "whisper-cli-$targetTriple.exe"
+          Copy-Item $whisperExe.FullName $runtimeAsset
+          Copy-Item $runtimeAsset "src-tauri/binaries/whisper-cli-$targetTriple.exe"
+
+          $hash = (Get-FileHash -Algorithm SHA256 $runtimeAsset).Hash.ToLowerInvariant()
+          "$hash  whisper-cli-$targetTriple.exe" |
+            Set-Content -NoNewline -Path "$runtimeAsset.sha256"
+
+          @'
+          const fs = require("fs");
+
+          const configPath = "src-tauri/tauri.conf.json";
+          const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+          const externalBin = new Set(config.bundle.externalBin || []);
+          externalBin.add("binaries/ffmpeg");
+          externalBin.add("binaries/whisper-cli");
+          config.bundle.externalBin = Array.from(externalBin);
+          config.bundle.targets = ["nsis"];
+          fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+          '@ | node
+
+      - name: Build Windows app
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Upload Windows release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $bundleDir = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $assets = Get-ChildItem -Path $bundleDir -File |
+            Where-Object { $_.Name -ne "latest.json" } |
+            ForEach-Object { $_.FullName }
+
+          $artifactDir = Join-Path $env:RUNNER_TEMP "windows-runtime-artifacts"
+          $assets += (Join-Path $artifactDir "whisper-cli-x86_64-pc-windows-msvc.exe")
+          $assets += (Join-Path $artifactDir "whisper-cli-x86_64-pc-windows-msvc.exe.sha256")
+
+          gh release upload $env:RELEASE_TAG $assets `
+            --repo $env:GITHUB_REPOSITORY `
             --clobber

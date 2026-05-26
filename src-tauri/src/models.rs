@@ -19,6 +19,15 @@ impl CaptureSource {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformCapabilities {
+    pub platform: String,
+    pub import_media: bool,
+    pub microphone_capture: bool,
+    pub system_audio_capture: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStatus {

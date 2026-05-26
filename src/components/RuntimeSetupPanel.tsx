@@ -31,18 +31,20 @@ function runtimeSource(path: string | null, binaryName: string) {
   if (!path) {
     return "Not resolved";
   }
+  const normalizedPath = path.replace(/\\/g, "/");
   if (
-    path.includes(`/runtime/${binaryName}`) ||
-    path.includes(`/binaries/${binaryName}`) ||
-    path.includes(`/Contents/MacOS/${binaryName}`) ||
-    path.includes(`${binaryName}-aarch64-apple-darwin`)
+    normalizedPath.includes(`/runtime/${binaryName}`) ||
+    normalizedPath.includes(`/binaries/${binaryName}`) ||
+    normalizedPath.includes(`/Contents/MacOS/${binaryName}`) ||
+    normalizedPath.includes(`${binaryName}-aarch64-apple-darwin`) ||
+    normalizedPath.includes(`${binaryName}-x86_64-pc-windows-msvc.exe`)
   ) {
     return "App sidecar";
   }
-  if (path.includes("/opt/homebrew") || path.includes("/usr/local")) {
+  if (normalizedPath.includes("/opt/homebrew") || normalizedPath.includes("/usr/local")) {
     return "Homebrew";
   }
-  if (path === binaryName) {
+  if (path === binaryName || path === `${binaryName}.exe`) {
     return "PATH";
   }
   return path;

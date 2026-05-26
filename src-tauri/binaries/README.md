@@ -2,6 +2,8 @@ Sidecar binaries in this directory must be named with Tauri's target suffix:
 
 - `ffmpeg-aarch64-apple-darwin`
 - `whisper-cli-aarch64-apple-darwin`
+- `ffmpeg-x86_64-pc-windows-msvc.exe`
+- `whisper-cli-x86_64-pc-windows-msvc.exe`
 
 Release builds stage `whisper-cli-<target-triple>` here during GitHub Actions and
 temporarily add it to Tauri's `externalBin` list before packaging. Leclog can also

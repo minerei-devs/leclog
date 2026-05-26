@@ -319,8 +319,17 @@ pub fn app_runtime_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_data_dir(app)?.join("runtime"))
 }
 
+fn target_binary_file_name(binary_name: &str) -> String {
+    let extension = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    format!("{}-{}{}", binary_name, current_target_triple(), extension)
+}
+
 fn whisper_runtime_file_name() -> String {
-    format!("whisper-cli-{}", current_target_triple())
+    target_binary_file_name("whisper-cli")
 }
 
 fn managed_whisper_cli_path(app: &AppHandle) -> Result<PathBuf> {
@@ -557,7 +566,7 @@ fn current_target_triple() -> &'static str {
 }
 
 pub fn resolve_ffmpeg_path(app: &AppHandle) -> PathBuf {
-    let target_triple = current_target_triple();
+    let target_binary_name = target_binary_file_name("ffmpeg");
     let mut candidates = Vec::new();
 
     if let Ok(path) = env::var("LECLOG_FFMPEG_PATH") {
@@ -567,22 +576,22 @@ pub fn resolve_ffmpeg_path(app: &AppHandle) -> PathBuf {
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("binaries")
-            .join(format!("ffmpeg-{target_triple}")),
+            .join(&target_binary_name),
     );
 
     if let Ok(current_exe) = env::current_exe() {
         if let Some(exe_dir) = current_exe.parent() {
             candidates.push(exe_dir.join("ffmpeg"));
-            candidates.push(exe_dir.join(format!("ffmpeg-{target_triple}")));
+            candidates.push(exe_dir.join(&target_binary_name));
+            #[cfg(target_os = "windows")]
+            candidates.push(exe_dir.join("ffmpeg.exe"));
         }
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.extend([
-            resource_dir.join(format!("ffmpeg-{target_triple}")),
-            resource_dir
-                .join("binaries")
-                .join(format!("ffmpeg-{target_triple}")),
+            resource_dir.join(&target_binary_name),
+            resource_dir.join("binaries").join(&target_binary_name),
         ]);
     }
 
@@ -633,20 +642,18 @@ pub fn resolve_whisper_cli_path(app: &AppHandle) -> PathBuf {
         }
     }
 
-    let target_triple = current_target_triple();
+    let target_binary_name = target_binary_file_name("whisper-cli");
     let local_sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
-        .join(format!("whisper-cli-{target_triple}"));
+        .join(&target_binary_name);
     if local_sidecar.exists() {
         return local_sidecar;
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
         for candidate in [
-            resource_dir.join(format!("whisper-cli-{target_triple}")),
-            resource_dir
-                .join("binaries")
-                .join(format!("whisper-cli-{target_triple}")),
+            resource_dir.join(&target_binary_name),
+            resource_dir.join("binaries").join(&target_binary_name),
         ] {
             if candidate.exists() {
                 return candidate;

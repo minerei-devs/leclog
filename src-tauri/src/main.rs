@@ -101,6 +101,7 @@ fn main() {
             commands::session_commands::list_session_summaries,
             commands::session_commands::get_session,
             commands::session_commands::update_session_title,
+            commands::session_commands::get_platform_capabilities,
             commands::session_commands::get_runtime_status,
             commands::session_commands::list_resources,
             commands::session_commands::delete_session,

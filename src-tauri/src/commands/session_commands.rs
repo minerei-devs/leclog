@@ -13,9 +13,10 @@ use uuid::Uuid;
 use crate::{
     models::{
         BackgroundTask, BackgroundTaskKind, CaptureSource, LectureSession,
-        ManagedTranscriptionModel, ModelDownloadStatus, ProcessingQualityPreset,
-        ProcessingSettings, ResourceItem, ResourceKind, ResourceOverview, RuntimeStatus,
-        SessionStatus, SessionSummary, TranscriptPhase, TranscriptSegment, TranscriptionModelInfo,
+        ManagedTranscriptionModel, ModelDownloadStatus, PlatformCapabilities,
+        ProcessingQualityPreset, ProcessingSettings, ResourceItem, ResourceKind, ResourceOverview,
+        RuntimeStatus, SessionStatus, SessionSummary, TranscriptPhase, TranscriptSegment,
+        TranscriptionModelInfo,
     },
     state::{
         AudioMeterState, ModelDownloadState, SessionState, SessionStorageSizeState,
@@ -30,6 +31,42 @@ const STABLE_SESSION_SIZE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
+}
+
+#[tauri::command]
+pub fn get_platform_capabilities() -> PlatformCapabilities {
+    PlatformCapabilities {
+        platform: std::env::consts::OS.to_string(),
+        import_media: true,
+        microphone_capture: cfg!(target_os = "macos"),
+        system_audio_capture: cfg!(target_os = "macos"),
+    }
+}
+
+fn capture_source_label(source: &CaptureSource) -> &'static str {
+    match source {
+        CaptureSource::Microphone => "Microphone",
+        CaptureSource::SystemAudio => "System audio",
+        CaptureSource::ImportedMedia => "Imported media",
+    }
+}
+
+fn live_capture_source_available(source: &CaptureSource) -> bool {
+    match source {
+        CaptureSource::Microphone | CaptureSource::SystemAudio => cfg!(target_os = "macos"),
+        CaptureSource::ImportedMedia => false,
+    }
+}
+
+fn ensure_live_capture_source_available(source: &CaptureSource) -> Result<(), String> {
+    if live_capture_source_available(source) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} capture is not available on this platform.",
+        capture_source_label(source)
+    ))
 }
 
 fn default_title() -> String {
@@ -670,6 +707,8 @@ pub fn create_session(
     live_refresh_interval_seconds: Option<u32>,
 ) -> Result<LectureSession, String> {
     let timestamp = now_iso();
+    let capture_source = CaptureSource::parse(capture_source.as_deref())?;
+    ensure_live_capture_source_available(&capture_source)?;
     let settings = resolve_processing_settings(
         &app,
         preferred_model_id,
@@ -690,7 +729,7 @@ pub fn create_session(
             .unwrap_or_else(default_title),
         created_at: timestamp.clone(),
         updated_at: timestamp,
-        capture_source: CaptureSource::parse(capture_source.as_deref())?,
+        capture_source,
         status: SessionStatus::Idle,
         duration_ms: 0,
         segments: Vec::new(),
@@ -1453,6 +1492,7 @@ pub async fn start_session_recording(
         if session.status != SessionStatus::Idle {
             return Err(String::from("Only idle sessions can be started."));
         }
+        ensure_live_capture_source_available(&session.capture_source)?;
 
         storage::ensure_session_paths(&app, session)
             .map_err(|error| format!("Failed to prepare session storage: {error}"))?;
@@ -1569,6 +1609,7 @@ pub async fn resume_session_recording(
         if session.status != SessionStatus::Paused {
             return Err(String::from("Only paused sessions can be resumed."));
         }
+        ensure_live_capture_source_available(&session.capture_source)?;
 
         if session.capture_source == CaptureSource::SystemAudio {
             let sample_rate = session.live_preview_sample_rate.unwrap_or(48_000);

@@ -9,6 +9,13 @@ export type CaptureSource = "microphone" | "systemAudio" | "importedMedia";
 export type TranscriptPhase = "idle" | "live" | "processing" | "ready" | "error";
 export type ModelDownloadStatus = "idle" | "downloading" | "completed" | "error";
 
+export interface PlatformCapabilities {
+  platform: string;
+  importMedia: boolean;
+  microphoneCapture: boolean;
+  systemAudioCapture: boolean;
+}
+
 export interface TranscriptSegment {
   id: string;
   startMs: number;

@@ -4,6 +4,7 @@ import type {
   BackgroundTask,
   LectureSession,
   ManagedTranscriptionModel,
+  PlatformCapabilities,
   ProcessingSettings,
   ResourceOverview,
   RuntimeStatus,
@@ -72,6 +73,10 @@ export function updateSessionTitle(sessionId: string, title: string) {
     sessionId,
     title: title.trim(),
   });
+}
+
+export function getPlatformCapabilities() {
+  return invoke<PlatformCapabilities>("get_platform_capabilities");
 }
 
 export function listTranscriptionModels() {
