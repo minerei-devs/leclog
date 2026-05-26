@@ -592,6 +592,10 @@ export function SessionListPage() {
     availableSources.some((source) => source.value === draftCaptureSource)
       ? draftCaptureSource
       : availableSources[0]?.value ?? "microphone";
+  const sessionCreationTitle =
+    !canCapture && platformCapabilities.importMedia && platformCapabilities.platform !== "unknown"
+      ? "Import media"
+      : "Capture or import";
 
   return (
     <section className="grid gap-3">
@@ -601,7 +605,7 @@ export function SessionListPage() {
             New session
           </Badge>
           <h2 className="mt-1 text-lg font-semibold tracking-tight text-slate-950">
-            Capture or import
+            {sessionCreationTitle}
           </h2>
         </div>
       </div>
