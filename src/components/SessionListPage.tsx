@@ -1,5 +1,6 @@
-import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import { ArrowUpRight, Import, MessageSquareText, Play, Settings2, X } from "lucide-react";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useNavigate } from "react-router-dom";
 import { useRecentState } from "@/hooks/useRecentState";
@@ -418,6 +419,39 @@ export function SessionListPage() {
     [recentState.activeSessionId, sessions],
   );
 
+  const importMediaPaths = useCallback(
+    async (paths: string[]) => {
+      const mediaPaths = paths.filter((path) => path.trim().length > 0);
+      if (mediaPaths.length === 0) {
+        return;
+      }
+
+      setCreationMode("import");
+      setIsImporting(true);
+      setError(null);
+
+      try {
+        const importedSessions: LectureSession[] = [];
+        for (const path of mediaPaths) {
+          importedSessions.push(
+            await importMediaSession(path, undefined, draftProcessingSettings),
+          );
+        }
+
+        const refreshed = await listSessionSummaries();
+        setSessions(refreshed);
+        if (importedSessions.length === 1) {
+          navigate(getSessionHref(importedSessions[0]));
+        }
+      } catch (reason) {
+        setError(getErrorMessage(reason, "Failed to import media files."));
+      } finally {
+        setIsImporting(false);
+      }
+    },
+    [draftProcessingSettings, navigate],
+  );
+
   useEffect(() => {
     let isMounted = true;
     let unlisten: (() => void) | undefined;
@@ -446,40 +480,7 @@ export function SessionListPage() {
             setCreationMode("import");
           }
           setIsImportDragActive(false);
-          const paths = event.payload.paths.filter((path) => path.trim().length > 0);
-          if (paths.length === 0) {
-            return;
-          }
-
-          setIsImporting(true);
-          setError(null);
-
-          try {
-            const importedSessions: LectureSession[] = [];
-            for (const path of paths) {
-              importedSessions.push(
-                await importMediaSession(path, undefined, draftProcessingSettings),
-              );
-            }
-
-            const refreshed = await listSessionSummaries();
-            if (!isMounted) {
-              return;
-            }
-
-            setSessions(refreshed);
-            if (importedSessions.length === 1) {
-              navigate(getSessionHref(importedSessions[0]));
-            }
-          } catch (reason) {
-            if (isMounted) {
-              setError(getErrorMessage(reason, "Failed to import media files."));
-            }
-          } finally {
-            if (isMounted) {
-              setIsImporting(false);
-            }
-          }
+          await importMediaPaths(event.payload.paths);
         }
       });
     }
@@ -490,7 +491,42 @@ export function SessionListPage() {
       isMounted = false;
       unlisten?.();
     };
-  }, [draftProcessingSettings, navigate, platformCapabilities.importMedia]);
+  }, [importMediaPaths, platformCapabilities.importMedia]);
+
+  async function handleChooseImportFiles() {
+    try {
+      const selected = await openFileDialog({
+        multiple: true,
+        filters: [
+          {
+            name: "Media",
+            extensions: [
+              "aac",
+              "aif",
+              "aiff",
+              "flac",
+              "m4a",
+              "mkv",
+              "mov",
+              "mp3",
+              "mp4",
+              "ogg",
+              "wav",
+              "webm",
+            ],
+          },
+        ],
+      });
+
+      if (!selected) {
+        return;
+      }
+
+      await importMediaPaths(Array.isArray(selected) ? selected : [selected]);
+    } catch (reason) {
+      setError(getErrorMessage(reason, "Failed to choose media files."));
+    }
+  }
 
   async function handleStartSession(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -752,9 +788,9 @@ export function SessionListPage() {
                   <h3 className="truncate text-sm font-semibold text-slate-950">Import media</h3>
                   <p
                     className="truncate text-xs text-slate-500"
-                    title="Drop audio or video files to create transcript-only sessions."
+                    title="Choose or drop audio/video files to create transcript-only sessions."
                   >
-                    Drag audio/video files here
+                    Choose or drop audio/video files
                   </p>
                 </div>
                 <Import className="size-4 text-slate-500" />
@@ -779,6 +815,17 @@ export function SessionListPage() {
                   >
                     Normalize and transcribe in the background.
                   </p>
+                  <Button
+                    type="button"
+                    variant={isImportDragActive ? "secondary" : "outline"}
+                    size="sm"
+                    className="mt-3"
+                    disabled={isImporting}
+                    onClick={handleChooseImportFiles}
+                  >
+                    <Import className="size-4" />
+                    Choose files
+                  </Button>
                 </div>
               </div>
             </div>
