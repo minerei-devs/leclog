@@ -12,6 +12,7 @@ import {
   PanelLeftOpen,
   Plus,
   RotateCcw,
+  Search,
   SlidersHorizontal,
   Waves,
   XCircle,
@@ -41,6 +42,7 @@ import { useAppSettings } from "@/hooks/useAppSettings";
 import { useSessionPolling } from "@/hooks/useSessionPolling";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { SettingsPage } from "./SettingsPage";
@@ -117,6 +119,24 @@ function activeSessionScore(session: Pick<SessionSummary, "status" | "transcript
     return 1;
   }
   return 0;
+}
+
+function normalizeSessionSearch(value: string) {
+  return value.trim().toLocaleLowerCase();
+}
+
+function sessionMatchesSearch(session: SessionSummary, query: string) {
+  if (!query) {
+    return true;
+  }
+
+  return [
+    session.title,
+    getCaptureSourceLabel(session.captureSource),
+    session.status,
+    session.transcriptPhase,
+    session.captureTargetLabel ?? "",
+  ].some((value) => value.toLocaleLowerCase().includes(query));
 }
 
 function isVisibleSessionTask(task: BackgroundTask) {
@@ -221,6 +241,7 @@ export function AppShell({ children }: PropsWithChildren) {
   const [taskPanelError, setTaskPanelError] = useState<string | null>(null);
   const [availableUpdateVersion, setAvailableUpdateVersion] = useState<string | null>(null);
   const [sessionSortMode, setSessionSortMode] = useState<SessionSortMode>("recent");
+  const [sessionSearchQuery, setSessionSearchQuery] = useState("");
   const [showLargeSessionsOnly, setShowLargeSessionsOnly] = useState(false);
   const [isSessionViewMenuOpen, setIsSessionViewMenuOpen] = useState(false);
   const hasActiveProcessing = sessions.some(
@@ -360,10 +381,18 @@ export function AppShell({ children }: PropsWithChildren) {
     () => sessions.filter((session) => session.storageBytes >= LARGE_SESSION_BYTES).length,
     [sessions],
   );
+  const normalizedSessionSearchQuery = normalizeSessionSearch(sessionSearchQuery);
+  const hasSessionSearch = normalizedSessionSearchQuery.length > 0;
   const sortedSessions = useMemo(() => {
-    const visibleSessions = showLargeSessionsOnly
+    const sizeFilteredSessions = showLargeSessionsOnly
       ? sessions.filter((session) => session.storageBytes >= LARGE_SESSION_BYTES)
       : [...sessions];
+
+    const visibleSessions = hasSessionSearch
+      ? sizeFilteredSessions.filter((session) =>
+          sessionMatchesSearch(session, normalizedSessionSearchQuery),
+        )
+      : sizeFilteredSessions;
 
     return visibleSessions.sort((left, right) => {
       const activityScore = activeSessionScore(right) - activeSessionScore(left);
@@ -378,14 +407,20 @@ export function AppShell({ children }: PropsWithChildren) {
       }
       return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
     });
-  }, [sessionSortMode, sessions, showLargeSessionsOnly]);
+  }, [
+    hasSessionSearch,
+    normalizedSessionSearchQuery,
+    sessionSortMode,
+    sessions,
+    showLargeSessionsOnly,
+  ]);
   const sessionSortLabel = sessionSortMode === "size" ? "Size" : "Recent";
   const sessionFilterLabel = showLargeSessionsOnly ? "Large only" : "All sessions";
   const sessionCountLabel =
     sessions.length === 0
       ? "No local sessions yet"
-      : showLargeSessionsOnly
-        ? `${sortedSessions.length} of ${sessions.length} large sessions`
+      : showLargeSessionsOnly || hasSessionSearch
+        ? `${sortedSessions.length} of ${sessions.length} shown`
         : `${sessions.length} saved locally`;
   const isNewSessionRoute = location.pathname === "/new";
   const activeTaskCount = tasks.filter(isActiveTask).length;
@@ -695,6 +730,27 @@ export function AppShell({ children }: PropsWithChildren) {
                   <span className="text-slate-300">/</span>
                   <span className="truncate">Show: {sessionFilterLabel}</span>
                 </div>
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400" />
+                  <Input
+                    value={sessionSearchQuery}
+                    onChange={(event) => setSessionSearchQuery(event.target.value)}
+                    placeholder="Search sessions"
+                    className="h-8 rounded-lg border-slate-200 bg-white pl-8 pr-8 text-xs"
+                    aria-label="Search sessions"
+                  />
+                  {hasSessionSearch ? (
+                    <button
+                      type="button"
+                      className="absolute right-1.5 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                      aria-label="Clear session search"
+                      title="Clear session search"
+                      onClick={() => setSessionSearchQuery("")}
+                    >
+                      <XCircle className="size-3.5" />
+                    </button>
+                  ) : null}
+                </div>
               </div>
             )}
           </div>
@@ -710,7 +766,9 @@ export function AppShell({ children }: PropsWithChildren) {
                 >
                   {isSidebarCollapsed
                     ? null
-                    : showLargeSessionsOnly
+                    : hasSessionSearch
+                      ? "No sessions match this search."
+                      : showLargeSessionsOnly
                       ? "No sessions at or above 1 GiB."
                       : "New sessions and imported media will appear here."}
                 </div>
