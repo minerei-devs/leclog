@@ -6,7 +6,13 @@ import { useSessionPolling } from "../hooks/useSessionPolling";
 import { getErrorMessage } from "../lib/errors";
 import { formatDate, formatDuration } from "../lib/format";
 import { getCaptureSourceLabel } from "../lib/session";
-import { deleteSession, getSession, polishSessionTranscript, updateSessionTitle } from "../lib/tauri";
+import {
+  deleteSession,
+  getSession,
+  polishSessionTranscript,
+  retrySessionProcessing,
+  updateSessionTitle,
+} from "../lib/tauri";
 import type { LectureSession } from "../types/session";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -27,6 +33,7 @@ export function SessionDetailPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isPolishing, setIsPolishing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isReviewReprocessing, setIsReviewReprocessing] = useState(false);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [isSavingTitle, setIsSavingTitle] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -163,6 +170,24 @@ export function SessionDetailPage() {
       setDeleteError(getErrorMessage(reason, "Failed to delete this session."));
     } finally {
       setIsDeleting(false);
+    }
+  }
+
+  async function handleReviewReprocess() {
+    if (!session) {
+      return;
+    }
+
+    setError(null);
+    setIsReviewReprocessing(true);
+    try {
+      const updated = await retrySessionProcessing(session.id);
+      setSession(updated);
+      window.dispatchEvent(new CustomEvent("leclog:sessions-changed"));
+    } catch (reason) {
+      setError(getErrorMessage(reason, "Failed to reprocess this session."));
+    } finally {
+      setIsReviewReprocessing(false);
     }
   }
 
@@ -419,6 +444,9 @@ export function SessionDetailPage() {
                 currentTimeMs={activeTimeMs}
                 seekRequest={seekRequest}
                 onTimeChange={setActiveTimeMs}
+                isReprocessing={isReviewReprocessing}
+                onOpenResources={() => setActiveTab("resources")}
+                onReprocess={() => void handleReviewReprocess()}
               />
             </div>
             <TranscriptPanel

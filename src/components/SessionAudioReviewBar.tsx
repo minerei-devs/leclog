@@ -1,5 +1,14 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { FileAudio, FileVideo, Pause, Play, SkipBack } from "lucide-react";
+import {
+  FastForward,
+  FileAudio,
+  FileVideo,
+  Pause,
+  Play,
+  RotateCcw,
+  SkipBack,
+  Wrench,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatDuration } from "../lib/format";
 import type { LectureSession } from "../types/session";
@@ -15,6 +24,9 @@ interface SessionAudioReviewBarProps {
   currentTimeMs: number | null;
   seekRequest: AudioSeekRequest | null;
   onTimeChange: (timeMs: number | null) => void;
+  isReprocessing?: boolean;
+  onOpenResources?: () => void;
+  onReprocess?: () => void | Promise<void>;
 }
 
 interface ReviewMediaSource {
@@ -103,15 +115,21 @@ function toAssetUrl(path: string) {
   }
 }
 
+const playbackRates = [0.75, 1, 1.25, 1.5, 2] as const;
+
 export function SessionAudioReviewBar({
   session,
   currentTimeMs,
   seekRequest,
   onTimeChange,
+  isReprocessing = false,
+  onOpenResources,
+  onReprocess,
 }: SessionAudioReviewBarProps) {
   const mediaRef = useRef<HTMLMediaElement | null>(null);
   const [durationMs, setDurationMs] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const mediaSource = useMemo(() => resolveReviewMediaSource(session), [session]);
   const mediaUrl = useMemo(
@@ -142,8 +160,51 @@ export function SessionAudioReviewBar({
     onTimeChange(nextTimeMs);
   }, [onTimeChange, safeDurationMs, seekRequest]);
 
+  useEffect(() => {
+    if (!mediaRef.current) {
+      return;
+    }
+
+    mediaRef.current.playbackRate = playbackRate;
+  }, [mediaUrl, playbackRate]);
+
   if (!mediaSource) {
-    return null;
+    return (
+      <section className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-amber-950">Review audio is unavailable</p>
+            <p className="text-[11px] text-amber-800">
+              This session has no managed audio or video file attached.
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {onOpenResources ? (
+              <Button type="button" variant="outline" size="sm" onClick={onOpenResources}>
+                Resources
+              </Button>
+            ) : null}
+            {onReprocess ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isReprocessing || session.audioFilePaths.length === 0}
+                title={
+                  session.audioFilePaths.length === 0
+                    ? "This session has no capture files to reprocess."
+                    : "Run normalize, transcribe, merge, and polish again for this session."
+                }
+                onClick={() => void onReprocess()}
+              >
+                <Wrench className="size-3.5" />
+                Repair
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </section>
+    );
   }
 
   function handleLoadedMetadata() {
@@ -168,6 +229,17 @@ export function SessionAudioReviewBar({
       mediaRef.current.currentTime = nextValue / 1000;
     }
     onTimeChange(nextValue);
+  }
+
+  function handleSkip(deltaMs: number) {
+    handleSeek(resolvedCurrentTimeMs + deltaMs);
+  }
+
+  function handlePlaybackRateChange(nextRate: number) {
+    setPlaybackRate(nextRate);
+    if (mediaRef.current) {
+      mediaRef.current.playbackRate = nextRate;
+    }
   }
 
   async function handleTogglePlayback() {
@@ -260,6 +332,26 @@ export function SessionAudioReviewBar({
           >
             <SkipBack className="size-3.5" />
           </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            title={`Skip ${mediaSource.kind} back 10 seconds`}
+            onClick={() => handleSkip(-10_000)}
+          >
+            <RotateCcw className="size-3.5" />
+            10s
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            title={`Skip ${mediaSource.kind} forward 30 seconds`}
+            onClick={() => handleSkip(30_000)}
+          >
+            <FastForward className="size-3.5" />
+            30s
+          </Button>
           {mediaSource.kind === "video" ? (
             <FileVideo className="size-4 shrink-0 text-slate-500" />
           ) : (
@@ -289,6 +381,60 @@ export function SessionAudioReviewBar({
           <span>/</span>
           <span>{formatDuration(resolvedDurationMs)}</span>
         </div>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+        <div
+          className="inline-flex min-w-0 rounded-lg border border-slate-200 bg-slate-50 p-0.5"
+          aria-label="Playback speed"
+        >
+          {playbackRates.map((rate) => {
+            const selected = playbackRate === rate;
+            return (
+              <button
+                key={rate}
+                type="button"
+                className={[
+                  "h-6 rounded-md px-2 text-[11px] font-semibold transition-colors",
+                  selected
+                    ? "bg-slate-950 text-white shadow-sm"
+                    : "text-slate-600 hover:bg-white hover:text-slate-950",
+                ].join(" ")}
+                aria-pressed={selected}
+                title={`Set playback speed to ${rate}x`}
+                onClick={() => handlePlaybackRateChange(rate)}
+              >
+                {rate}x
+              </button>
+            );
+          })}
+        </div>
+        {onOpenResources || onReprocess ? (
+          <div className="flex shrink-0 items-center gap-1">
+            {onOpenResources ? (
+              <Button type="button" variant="ghost" size="sm" onClick={onOpenResources}>
+                Resources
+              </Button>
+            ) : null}
+            {onReprocess ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isReprocessing || session.audioFilePaths.length === 0}
+                title={
+                  session.audioFilePaths.length === 0
+                    ? "This session has no capture files to reprocess."
+                    : "Run normalize, transcribe, merge, and polish again for this session."
+                }
+                onClick={() => void onReprocess()}
+              >
+                <Wrench className="size-3.5" />
+                Repair
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {error ? <p className="mt-1 text-xs text-red-600">{error}</p> : null}
