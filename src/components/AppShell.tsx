@@ -37,7 +37,13 @@ import {
   summarizeTaskError,
   taskFailureMeta,
 } from "@/lib/tasks";
-import type { BackgroundTask, SessionSummary } from "@/types/session";
+import type {
+  BackgroundTask,
+  CaptureSource,
+  SessionStatus,
+  SessionSummary,
+  TranscriptPhase,
+} from "@/types/session";
 import { useAppSettings } from "@/hooks/useAppSettings";
 import { useSessionPolling } from "@/hooks/useSessionPolling";
 import { Badge } from "@/components/ui/badge";
@@ -96,6 +102,34 @@ function formatSidebarTime(date: string) {
 
 const LARGE_SESSION_BYTES = 1024 ** 3;
 type SessionSortMode = "recent" | "size";
+type SessionStatusFilter = "all" | SessionStatus;
+type SessionSourceFilter = "all" | CaptureSource;
+type SessionPhaseFilter = "all" | TranscriptPhase;
+
+const sessionStatusFilterOptions: { value: SessionStatusFilter; label: string }[] = [
+  { value: "all", label: "Any status" },
+  { value: "recording", label: "Recording" },
+  { value: "paused", label: "Paused" },
+  { value: "processing", label: "Processing" },
+  { value: "done", label: "Done" },
+  { value: "idle", label: "Idle" },
+];
+
+const sessionSourceFilterOptions: { value: SessionSourceFilter; label: string }[] = [
+  { value: "all", label: "Any source" },
+  { value: "importedMedia", label: "Imported media" },
+  { value: "microphone", label: "Microphone" },
+  { value: "systemAudio", label: "System audio" },
+];
+
+const sessionPhaseFilterOptions: { value: SessionPhaseFilter; label: string }[] = [
+  { value: "all", label: "Any phase" },
+  { value: "ready", label: "Ready" },
+  { value: "processing", label: "Processing" },
+  { value: "live", label: "Live" },
+  { value: "error", label: "Error" },
+  { value: "idle", label: "Idle" },
+];
 
 function sessionStorageBadgeClass(storageBytes: number) {
   if (storageBytes >= LARGE_SESSION_BYTES) {
@@ -137,6 +171,19 @@ function sessionMatchesSearch(session: SessionSummary, query: string) {
     session.transcriptPhase,
     session.captureTargetLabel ?? "",
   ].some((value) => value.toLocaleLowerCase().includes(query));
+}
+
+function sessionMatchesFilters(
+  session: SessionSummary,
+  statusFilter: SessionStatusFilter,
+  sourceFilter: SessionSourceFilter,
+  phaseFilter: SessionPhaseFilter,
+) {
+  return (
+    (statusFilter === "all" || session.status === statusFilter) &&
+    (sourceFilter === "all" || session.captureSource === sourceFilter) &&
+    (phaseFilter === "all" || session.transcriptPhase === phaseFilter)
+  );
 }
 
 function isVisibleSessionTask(task: BackgroundTask) {
@@ -243,6 +290,11 @@ export function AppShell({ children }: PropsWithChildren) {
   const [sessionSortMode, setSessionSortMode] = useState<SessionSortMode>("recent");
   const [sessionSearchQuery, setSessionSearchQuery] = useState("");
   const [showLargeSessionsOnly, setShowLargeSessionsOnly] = useState(false);
+  const [sessionStatusFilter, setSessionStatusFilter] =
+    useState<SessionStatusFilter>("all");
+  const [sessionSourceFilter, setSessionSourceFilter] =
+    useState<SessionSourceFilter>("all");
+  const [sessionPhaseFilter, setSessionPhaseFilter] = useState<SessionPhaseFilter>("all");
   const [isSessionViewMenuOpen, setIsSessionViewMenuOpen] = useState(false);
   const hasActiveProcessing = sessions.some(
     (session) =>
@@ -383,16 +435,38 @@ export function AppShell({ children }: PropsWithChildren) {
   );
   const normalizedSessionSearchQuery = normalizeSessionSearch(sessionSearchQuery);
   const hasSessionSearch = normalizedSessionSearchQuery.length > 0;
+  const activeSessionFilterLabels = [
+    showLargeSessionsOnly ? "Large" : null,
+    sessionStatusFilter !== "all"
+      ? sessionStatusFilterOptions.find((item) => item.value === sessionStatusFilter)?.label
+      : null,
+    sessionSourceFilter !== "all"
+      ? sessionSourceFilterOptions.find((item) => item.value === sessionSourceFilter)?.label
+      : null,
+    sessionPhaseFilter !== "all"
+      ? sessionPhaseFilterOptions.find((item) => item.value === sessionPhaseFilter)?.label
+      : null,
+  ].filter(Boolean) as string[];
+  const hasAdvancedSessionFilters = activeSessionFilterLabels.length > 0;
   const sortedSessions = useMemo(() => {
     const sizeFilteredSessions = showLargeSessionsOnly
       ? sessions.filter((session) => session.storageBytes >= LARGE_SESSION_BYTES)
       : [...sessions];
 
+    const advancedFilteredSessions = sizeFilteredSessions.filter((session) =>
+      sessionMatchesFilters(
+        session,
+        sessionStatusFilter,
+        sessionSourceFilter,
+        sessionPhaseFilter,
+      ),
+    );
+
     const visibleSessions = hasSessionSearch
-      ? sizeFilteredSessions.filter((session) =>
+      ? advancedFilteredSessions.filter((session) =>
           sessionMatchesSearch(session, normalizedSessionSearchQuery),
         )
-      : sizeFilteredSessions;
+      : advancedFilteredSessions;
 
     return visibleSessions.sort((left, right) => {
       const activityScore = activeSessionScore(right) - activeSessionScore(left);
@@ -410,16 +484,21 @@ export function AppShell({ children }: PropsWithChildren) {
   }, [
     hasSessionSearch,
     normalizedSessionSearchQuery,
+    sessionPhaseFilter,
     sessionSortMode,
+    sessionSourceFilter,
+    sessionStatusFilter,
     sessions,
     showLargeSessionsOnly,
   ]);
   const sessionSortLabel = sessionSortMode === "size" ? "Size" : "Recent";
-  const sessionFilterLabel = showLargeSessionsOnly ? "Large only" : "All sessions";
+  const sessionFilterLabel = hasAdvancedSessionFilters
+    ? activeSessionFilterLabels.join(" + ")
+    : "All sessions";
   const sessionCountLabel =
     sessions.length === 0
       ? "No local sessions yet"
-      : showLargeSessionsOnly || hasSessionSearch
+      : hasAdvancedSessionFilters || hasSessionSearch
         ? `${sortedSessions.length} of ${sessions.length} shown`
         : `${sessions.length} saved locally`;
   const isNewSessionRoute = location.pathname === "/new";
@@ -665,7 +744,7 @@ export function AppShell({ children }: PropsWithChildren) {
                     </Button>
                     {isSessionViewMenuOpen ? (
                       <div
-                        className="absolute right-0 top-8 z-50 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white py-1.5 text-sm shadow-xl"
+                        className="absolute right-0 top-8 z-50 max-h-[min(540px,calc(100vh-160px))] w-60 overflow-y-auto rounded-lg border border-slate-200 bg-white py-1.5 text-sm shadow-xl"
                         role="menu"
                       >
                         <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
@@ -721,6 +800,85 @@ export function AppShell({ children }: PropsWithChildren) {
                             </button>
                           );
                         })}
+                        <Separator className="my-1" />
+                        <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                          Status
+                        </div>
+                        {sessionStatusFilterOptions.map((item) => {
+                          const selected = sessionStatusFilter === item.value;
+                          return (
+                            <button
+                              key={item.value}
+                              type="button"
+                              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50"
+                              role="menuitemradio"
+                              aria-checked={selected}
+                              onClick={() => setSessionStatusFilter(item.value)}
+                            >
+                              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                              {selected ? <Check className="size-3.5 text-blue-600" /> : null}
+                            </button>
+                          );
+                        })}
+                        <Separator className="my-1" />
+                        <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                          Source
+                        </div>
+                        {sessionSourceFilterOptions.map((item) => {
+                          const selected = sessionSourceFilter === item.value;
+                          return (
+                            <button
+                              key={item.value}
+                              type="button"
+                              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50"
+                              role="menuitemradio"
+                              aria-checked={selected}
+                              onClick={() => setSessionSourceFilter(item.value)}
+                            >
+                              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                              {selected ? <Check className="size-3.5 text-blue-600" /> : null}
+                            </button>
+                          );
+                        })}
+                        <Separator className="my-1" />
+                        <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                          Transcript
+                        </div>
+                        {sessionPhaseFilterOptions.map((item) => {
+                          const selected = sessionPhaseFilter === item.value;
+                          return (
+                            <button
+                              key={item.value}
+                              type="button"
+                              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50"
+                              role="menuitemradio"
+                              aria-checked={selected}
+                              onClick={() => setSessionPhaseFilter(item.value)}
+                            >
+                              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                              {selected ? <Check className="size-3.5 text-blue-600" /> : null}
+                            </button>
+                          );
+                        })}
+                        {hasAdvancedSessionFilters ? (
+                          <>
+                            <Separator className="my-1" />
+                            <button
+                              type="button"
+                              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                              role="menuitem"
+                              onClick={() => {
+                                setShowLargeSessionsOnly(false);
+                                setSessionStatusFilter("all");
+                                setSessionSourceFilter("all");
+                                setSessionPhaseFilter("all");
+                              }}
+                            >
+                              <XCircle className="size-3.5 text-slate-500" />
+                              Clear filters
+                            </button>
+                          </>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
@@ -751,6 +909,31 @@ export function AppShell({ children }: PropsWithChildren) {
                     </button>
                   ) : null}
                 </div>
+                {hasAdvancedSessionFilters ? (
+                  <div className="flex min-w-0 flex-wrap items-center gap-1">
+                    {activeSessionFilterLabels.map((label) => (
+                      <Badge
+                        key={label}
+                        variant="outline"
+                        className="rounded-md border-slate-200 bg-slate-50 px-1.5 py-0 text-[10px] text-slate-600"
+                      >
+                        {label}
+                      </Badge>
+                    ))}
+                    <button
+                      type="button"
+                      className="rounded-md px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                      onClick={() => {
+                        setShowLargeSessionsOnly(false);
+                        setSessionStatusFilter("all");
+                        setSessionSourceFilter("all");
+                        setSessionPhaseFilter("all");
+                      }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                ) : null}
               </div>
             )}
           </div>
@@ -766,10 +949,8 @@ export function AppShell({ children }: PropsWithChildren) {
                 >
                   {isSidebarCollapsed
                     ? null
-                    : hasSessionSearch
-                      ? "No sessions match this search."
-                      : showLargeSessionsOnly
-                      ? "No sessions at or above 1 GiB."
+                    : hasSessionSearch || hasAdvancedSessionFilters
+                      ? "No sessions match the current search or filters."
                       : "New sessions and imported media will appear here."}
                 </div>
               ) : (
