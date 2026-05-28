@@ -117,6 +117,47 @@ pub struct LectureSession {
     pub processing_settings: Option<ProcessingSettings>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionExportFormat {
+    Txt,
+    Markdown,
+    Srt,
+    Vtt,
+    Json,
+    LectureNotes,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TranscriptExportLayer {
+    Raw,
+    Polished,
+    Corrected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportRequest {
+    pub session_id: String,
+    pub format: SessionExportFormat,
+    pub layer: TranscriptExportLayer,
+    pub include_metadata: bool,
+    pub include_timestamps: bool,
+    pub include_resource_paths: bool,
+    #[serde(default)]
+    pub output_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportResult {
+    pub path: String,
+    pub file_name: String,
+    pub format: SessionExportFormat,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {

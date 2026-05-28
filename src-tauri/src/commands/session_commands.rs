@@ -15,8 +15,8 @@ use crate::{
         BackgroundTask, BackgroundTaskKind, CaptureSource, LectureSession,
         ManagedTranscriptionModel, ModelDownloadStatus, PlatformCapabilities,
         ProcessingQualityPreset, ProcessingSettings, ResourceItem, ResourceKind, ResourceOverview,
-        RuntimeStatus, SessionStatus, SessionSummary, TranscriptPhase, TranscriptSegment,
-        TranscriptionModelInfo,
+        RuntimeStatus, SessionExportRequest, SessionExportResult, SessionStatus, SessionSummary,
+        TranscriptPhase, TranscriptSegment, TranscriptionModelInfo,
     },
     state::{
         AudioMeterState, ModelDownloadState, SessionState, SessionStorageSizeState,
@@ -935,6 +935,24 @@ pub fn get_session(
         .find(|session| session.id == id)
         .map(|session| present_session_with_meter(&session, Some(&audio_meter)))
         .ok_or_else(|| format!("Session with id {id} was not found."))
+}
+
+#[tauri::command]
+pub fn export_session_deliverable(
+    app: AppHandle,
+    state: State<'_, SessionState>,
+    request: SessionExportRequest,
+) -> Result<SessionExportResult, String> {
+    let session = state.read(|sessions| {
+        sessions
+            .iter()
+            .find(|session| session.id == request.session_id)
+            .cloned()
+            .ok_or_else(|| format!("Session with id {} was not found.", request.session_id))
+    })?;
+
+    storage::export_session_deliverable(&app, &present_session(&session), &request)
+        .map_err(|error| format!("Failed to export session deliverable: {error}"))
 }
 
 #[tauri::command]

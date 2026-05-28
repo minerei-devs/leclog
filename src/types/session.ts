@@ -51,6 +51,33 @@ export interface LectureSession {
   processingSettings: ProcessingSettings | null;
 }
 
+export type SessionExportFormat =
+  | "txt"
+  | "markdown"
+  | "srt"
+  | "vtt"
+  | "json"
+  | "lectureNotes";
+
+export type TranscriptExportLayer = "raw" | "polished" | "corrected";
+
+export interface SessionExportRequest {
+  sessionId: string;
+  format: SessionExportFormat;
+  layer: TranscriptExportLayer;
+  includeMetadata: boolean;
+  includeTimestamps: boolean;
+  includeResourcePaths: boolean;
+  outputName?: string | null;
+}
+
+export interface SessionExportResult {
+  path: string;
+  fileName: string;
+  format: SessionExportFormat;
+  sizeBytes: number;
+}
+
 export interface SessionSummary {
   id: string;
   title: string;

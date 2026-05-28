@@ -9,8 +9,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use reqwest::blocking::Client;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
@@ -18,7 +19,8 @@ use uuid::Uuid;
 use crate::{
     models::{
         BackgroundTask, LectureSession, ManagedTranscriptionModel, ModelDownloadStatus,
-        ProcessingQualityPreset, ProcessingSettings, SessionStatus, TaskFailureLog,
+        ProcessingQualityPreset, ProcessingSettings, SessionExportFormat, SessionExportRequest,
+        SessionExportResult, SessionStatus, TaskFailureLog, TranscriptExportLayer,
         TranscriptSegment, TranscriptionModelInfo,
     },
     state::TranscriptionTaskState,
@@ -36,6 +38,7 @@ const TRANSCRIPT_JSON_FILE_NAME: &str = "transcript.json";
 const LIVE_PREVIEW_AUDIO_FILE_NAME: &str = "live-preview.wav";
 const LIVE_TRANSCRIPT_JSON_FILE_NAME: &str = "live-transcript.json";
 const LIVE_TRANSCRIPT_WINDOW_AUDIO_FILE_NAME: &str = "live-transcript-window.wav";
+const EXPORTS_DIR_NAME: &str = "exports";
 const CHUNKS_DIR_NAME: &str = "chunks";
 const TASK_FAILURES_DIR_NAME: &str = "task-failures";
 const TASK_LOGS_DIR_NAME: &str = "logs/tasks";
@@ -488,6 +491,10 @@ fn live_transcript_window_audio_path(app: &AppHandle, session_id: &str) -> Resul
     Ok(session_dir_path(app, session_id)?
         .join("processed")
         .join(LIVE_TRANSCRIPT_WINDOW_AUDIO_FILE_NAME))
+}
+
+fn exports_dir_path(app: &AppHandle, session_id: &str) -> Result<PathBuf> {
+    Ok(session_dir_path(app, session_id)?.join(EXPORTS_DIR_NAME))
 }
 
 fn concat_inputs_path(app: &AppHandle, session_id: &str) -> Result<PathBuf> {
@@ -1880,6 +1887,395 @@ pub fn write_polished_transcript(app: &AppHandle, session: &LectureSession) -> R
     Ok(())
 }
 
+fn export_extension(format: &SessionExportFormat) -> &'static str {
+    match format {
+        SessionExportFormat::Txt => "txt",
+        SessionExportFormat::Markdown | SessionExportFormat::LectureNotes => "md",
+        SessionExportFormat::Srt => "srt",
+        SessionExportFormat::Vtt => "vtt",
+        SessionExportFormat::Json => "json",
+    }
+}
+
+fn export_name_suffix(format: &SessionExportFormat, layer: &TranscriptExportLayer) -> &'static str {
+    match format {
+        SessionExportFormat::Txt => match layer {
+            TranscriptExportLayer::Raw => "raw",
+            TranscriptExportLayer::Polished => "polished",
+            TranscriptExportLayer::Corrected => "corrected",
+        },
+        SessionExportFormat::Markdown => match layer {
+            TranscriptExportLayer::Raw => "raw",
+            TranscriptExportLayer::Polished => "polished",
+            TranscriptExportLayer::Corrected => "corrected",
+        },
+        SessionExportFormat::Srt | SessionExportFormat::Vtt => "captions",
+        SessionExportFormat::Json => "session",
+        SessionExportFormat::LectureNotes => "lecture-notes",
+    }
+}
+
+fn export_file_name(session: &LectureSession, request: &SessionExportRequest) -> String {
+    let extension = export_extension(&request.format);
+    let fallback_stem = format!(
+        "{}-{}",
+        sanitize_path_part(&session.title),
+        export_name_suffix(&request.format, &request.layer)
+    );
+    let requested_stem = request
+        .output_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| Path::new(value).file_stem().and_then(|stem| stem.to_str()))
+        .map(sanitize_path_part)
+        .filter(|value| !value.is_empty());
+    let stem = requested_stem.unwrap_or(fallback_stem);
+    format!("{stem}.{extension}")
+}
+
+fn format_duration_clock(duration_ms: u64) -> String {
+    let total_seconds = duration_ms / 1000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+fn format_timestamp_label(duration_ms: u64) -> String {
+    let total_seconds = duration_ms / 1000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn format_srt_timestamp(duration_ms: u64) -> String {
+    let total_seconds = duration_ms / 1000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    let millis = duration_ms % 1000;
+    format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
+}
+
+fn format_vtt_timestamp(duration_ms: u64) -> String {
+    let total_seconds = duration_ms / 1000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    let millis = duration_ms % 1000;
+    format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
+}
+
+fn raw_transcript_text(session: &LectureSession) -> String {
+    session
+        .segments
+        .iter()
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn transcript_text_for_layer(
+    session: &LectureSession,
+    layer: &TranscriptExportLayer,
+) -> Result<String> {
+    match layer {
+        TranscriptExportLayer::Raw => {
+            let text = raw_transcript_text(session);
+            if text.trim().is_empty() {
+                anyhow::bail!("No raw transcript text is available for this session.");
+            }
+            Ok(text)
+        }
+        TranscriptExportLayer::Polished => session
+            .polished_transcript_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .context("No polished transcript text is available for this session."),
+        TranscriptExportLayer::Corrected => {
+            anyhow::bail!("Corrected transcript export is not available yet.")
+        }
+    }
+}
+
+fn push_markdown_metadata(output: &mut String, session: &LectureSession, include_resources: bool) {
+    output.push_str("## Metadata\n\n");
+    output.push_str(&format!("- Session ID: {}\n", session.id));
+    output.push_str(&format!("- Created: {}\n", session.created_at));
+    output.push_str(&format!("- Updated: {}\n", session.updated_at));
+    output.push_str(&format!(
+        "- Duration: {}\n",
+        format_duration_clock(session.duration_ms)
+    ));
+    output.push_str(&format!("- Status: {:?}\n", session.status));
+    output.push_str(&format!("- Capture source: {:?}\n", session.capture_source));
+    output.push_str(&format!(
+        "- Transcript phase: {:?}\n",
+        session.transcript_phase
+    ));
+    if let Some(capture_target_label) = &session.capture_target_label {
+        output.push_str(&format!("- Capture target: {capture_target_label}\n"));
+    }
+    if let Some(settings) = &session.processing_settings {
+        output.push_str(&format!("- Language: {}\n", settings.language));
+        output.push_str(&format!(
+            "- Quality preset: {:?}\n",
+            settings.quality_preset
+        ));
+        if let Some(model_id) = &settings.preferred_model_id {
+            output.push_str(&format!("- Preferred model: {model_id}\n"));
+        }
+    }
+    if include_resources {
+        output.push_str(&format!(
+            "- Capture files: {}\n",
+            session.audio_file_paths.len()
+        ));
+        if let Some(normalized_audio_path) = &session.normalized_audio_path {
+            output.push_str(&format!("- Normalized audio: {normalized_audio_path}\n"));
+        }
+        if let Some(processed_transcript_path) = &session.processed_transcript_path {
+            output.push_str(&format!(
+                "- Raw transcript file: {processed_transcript_path}\n"
+            ));
+        }
+        if let Some(polished_transcript_path) = &session.polished_transcript_path {
+            output.push_str(&format!(
+                "- Polished transcript file: {polished_transcript_path}\n"
+            ));
+        }
+    }
+    output.push('\n');
+}
+
+fn render_txt_export(session: &LectureSession, request: &SessionExportRequest) -> Result<String> {
+    let mut output = String::new();
+    if request.include_metadata {
+        output.push_str(&format!("{}\n", session.title));
+        output.push_str(&format!("Created: {}\n", session.created_at));
+        output.push_str(&format!(
+            "Duration: {}\n",
+            format_duration_clock(session.duration_ms)
+        ));
+        output.push_str(&format!("Capture source: {:?}\n", session.capture_source));
+        output.push('\n');
+    }
+    output.push_str(transcript_text_for_layer(session, &request.layer)?.trim());
+    output.push('\n');
+    Ok(output)
+}
+
+fn render_markdown_export(
+    session: &LectureSession,
+    request: &SessionExportRequest,
+) -> Result<String> {
+    let mut output = String::new();
+    output.push_str(&format!("# {}\n\n", session.title));
+    if request.include_metadata {
+        push_markdown_metadata(&mut output, session, request.include_resource_paths);
+    }
+    output.push_str("## Transcript\n\n");
+    if request.include_timestamps && request.layer == TranscriptExportLayer::Raw {
+        for segment in &session.segments {
+            let text = segment.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            output.push_str(&format!(
+                "- [{}] {}\n",
+                format_timestamp_label(segment.start_ms),
+                text
+            ));
+        }
+        if session.segments.is_empty() {
+            anyhow::bail!("No timestamped transcript segments are available for this session.");
+        }
+    } else {
+        output.push_str(transcript_text_for_layer(session, &request.layer)?.trim());
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+fn caption_segments(session: &LectureSession) -> Vec<(u64, u64, String)> {
+    let mut cues = Vec::new();
+    let mut last_end_ms = 0_u64;
+    for segment in &session.segments {
+        let text = segment.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let start_ms = segment.start_ms.max(last_end_ms);
+        let end_ms = segment.end_ms.max(start_ms.saturating_add(1_000));
+        cues.push((start_ms, end_ms, text.to_string()));
+        last_end_ms = end_ms;
+    }
+    cues
+}
+
+fn render_srt_export(session: &LectureSession) -> Result<String> {
+    let cues = caption_segments(session);
+    if cues.is_empty() {
+        anyhow::bail!("No timestamped transcript segments are available for caption export.");
+    }
+    let mut output = String::new();
+    for (index, (start_ms, end_ms, text)) in cues.iter().enumerate() {
+        output.push_str(&format!("{}\n", index + 1));
+        output.push_str(&format!(
+            "{} --> {}\n",
+            format_srt_timestamp(*start_ms),
+            format_srt_timestamp(*end_ms)
+        ));
+        output.push_str(text);
+        output.push_str("\n\n");
+    }
+    Ok(output)
+}
+
+fn render_vtt_export(session: &LectureSession) -> Result<String> {
+    let cues = caption_segments(session);
+    if cues.is_empty() {
+        anyhow::bail!("No timestamped transcript segments are available for caption export.");
+    }
+    let mut output = String::from("WEBVTT\n\n");
+    for (start_ms, end_ms, text) in cues {
+        output.push_str(&format!(
+            "{} --> {}\n",
+            format_vtt_timestamp(start_ms),
+            format_vtt_timestamp(end_ms)
+        ));
+        output.push_str(&text);
+        output.push_str("\n\n");
+    }
+    Ok(output)
+}
+
+fn render_json_export(session: &LectureSession, request: &SessionExportRequest) -> Result<String> {
+    let resource_paths = if request.include_resource_paths {
+        json!({
+            "sessionDir": session.session_dir,
+            "audioFilePaths": session.audio_file_paths,
+            "activeAudioFilePath": session.active_audio_file_path,
+            "normalizedAudioPath": session.normalized_audio_path,
+            "livePreviewAudioPath": session.live_preview_audio_path,
+            "processedTranscriptPath": session.processed_transcript_path,
+            "polishedTranscriptPath": session.polished_transcript_path,
+        })
+    } else {
+        Value::Null
+    };
+
+    serde_json::to_string_pretty(&json!({
+        "schemaVersion": 1,
+        "exportedAt": Utc::now().to_rfc3339(),
+        "session": {
+            "id": session.id,
+            "title": session.title,
+            "createdAt": session.created_at,
+            "updatedAt": session.updated_at,
+            "captureSource": session.capture_source,
+            "status": session.status,
+            "durationMs": session.duration_ms,
+            "audioMimeType": session.audio_mime_type,
+            "transcriptPhase": session.transcript_phase,
+            "transcriptError": session.transcript_error,
+            "captureTargetLabel": session.capture_target_label,
+        },
+        "processingSettings": session.processing_settings,
+        "resources": resource_paths,
+        "transcript": {
+            "segments": session.segments,
+            "rawText": raw_transcript_text(session),
+            "polishedText": session.polished_transcript_text,
+            "correctedText": Value::Null,
+        }
+    }))
+    .context("Failed to serialize session export JSON.")
+}
+
+fn render_lecture_notes_export(
+    session: &LectureSession,
+    request: &SessionExportRequest,
+) -> Result<String> {
+    let transcript_text = session
+        .polished_transcript_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| raw_transcript_text(session));
+    if transcript_text.trim().is_empty() {
+        anyhow::bail!("No transcript text is available for lecture notes export.");
+    }
+
+    let mut output = String::new();
+    output.push_str(&format!("# {}\n\n", session.title));
+    if request.include_metadata {
+        push_markdown_metadata(&mut output, session, request.include_resource_paths);
+    }
+    output.push_str("## Summary\n\n");
+    output.push_str("- \n\n");
+    output.push_str("## Key Points\n\n");
+    output.push_str("- \n\n");
+    output.push_str("## Terms\n\n");
+    output.push_str("- \n\n");
+    output.push_str("## Questions\n\n");
+    output.push_str("- \n\n");
+    output.push_str("## Follow-ups\n\n");
+    output.push_str("- \n\n");
+    output.push_str("## Transcript Appendix\n\n");
+    output.push_str(transcript_text.trim());
+    output.push('\n');
+    Ok(output)
+}
+
+pub fn export_session_deliverable(
+    app: &AppHandle,
+    session: &LectureSession,
+    request: &SessionExportRequest,
+) -> Result<SessionExportResult> {
+    if request.session_id != session.id {
+        anyhow::bail!("Export request session id does not match the selected session.");
+    }
+    if request.layer == TranscriptExportLayer::Corrected {
+        anyhow::bail!("Corrected transcript export is not available yet.");
+    }
+
+    let payload = match request.format {
+        SessionExportFormat::Txt => render_txt_export(session, request)?,
+        SessionExportFormat::Markdown => render_markdown_export(session, request)?,
+        SessionExportFormat::Srt => render_srt_export(session)?,
+        SessionExportFormat::Vtt => render_vtt_export(session)?,
+        SessionExportFormat::Json => render_json_export(session, request)?,
+        SessionExportFormat::LectureNotes => render_lecture_notes_export(session, request)?,
+    };
+
+    let exports_dir = exports_dir_path(app, &session.id)?;
+    fs::create_dir_all(&exports_dir).context("Failed to create the session exports directory.")?;
+    let file_name = export_file_name(session, request);
+    let path = exports_dir.join(&file_name);
+    fs::write(&path, payload).context("Failed to write the session export file.")?;
+    let size_bytes = fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+
+    Ok(SessionExportResult {
+        path: path.display().to_string(),
+        file_name,
+        format: request.format.clone(),
+        size_bytes,
+    })
+}
+
 pub fn list_transcription_models(app: &AppHandle) -> Result<Vec<TranscriptionModelInfo>> {
     let recommended_path = resolve_whisper_model_path(app, None);
     let mut models = Vec::new();
@@ -2529,9 +2925,71 @@ pub fn append_live_preview_chunk_to_path(
 mod tests {
     use super::{
         normalize_processing_settings, parse_transcript_segments_with_finality,
-        polish_transcript_text,
+        polish_transcript_text, render_json_export, render_lecture_notes_export, render_srt_export,
     };
-    use crate::models::{ProcessingQualityPreset, ProcessingSettings, TranscriptSegment};
+    use crate::models::{
+        CaptureSource, LectureSession, ProcessingQualityPreset, ProcessingSettings,
+        SessionExportFormat, SessionExportRequest, SessionStatus, TranscriptExportLayer,
+        TranscriptPhase, TranscriptSegment,
+    };
+
+    fn export_test_session() -> LectureSession {
+        LectureSession {
+            id: String::from("session-1"),
+            title: String::from("Distributed Systems"),
+            created_at: String::from("2026-05-28T00:00:00Z"),
+            updated_at: String::from("2026-05-28T00:10:00Z"),
+            capture_source: CaptureSource::ImportedMedia,
+            status: SessionStatus::Done,
+            duration_ms: 10_000,
+            segments: vec![
+                TranscriptSegment {
+                    id: String::from("1"),
+                    start_ms: 0,
+                    end_ms: 2_500,
+                    text: String::from("Welcome to the lecture."),
+                    is_final: true,
+                },
+                TranscriptSegment {
+                    id: String::from("2"),
+                    start_ms: 2_500,
+                    end_ms: 5_000,
+                    text: String::from("We discuss consensus."),
+                    is_final: true,
+                },
+            ],
+            session_dir: Some(String::from("/tmp/session-1")),
+            audio_file_paths: vec![String::from("/tmp/session-1/audio.wav")],
+            active_audio_file_path: None,
+            audio_mime_type: Some(String::from("audio/wav")),
+            normalized_audio_path: Some(String::from("/tmp/session-1/normalized.wav")),
+            processed_transcript_path: Some(String::from("/tmp/session-1/transcript.txt")),
+            polished_transcript_path: Some(String::from("/tmp/session-1/transcript-polished.txt")),
+            polished_transcript_text: Some(String::from(
+                "Welcome to the lecture.\n\nWe discuss consensus.",
+            )),
+            live_preview_audio_path: None,
+            live_preview_sample_rate: None,
+            transcript_phase: TranscriptPhase::Ready,
+            transcript_error: None,
+            audio_level: None,
+            last_resumed_at: None,
+            capture_target_label: None,
+            processing_settings: Some(ProcessingSettings::default()),
+        }
+    }
+
+    fn export_request(format: SessionExportFormat) -> SessionExportRequest {
+        SessionExportRequest {
+            session_id: String::from("session-1"),
+            format,
+            layer: TranscriptExportLayer::Raw,
+            include_metadata: true,
+            include_timestamps: true,
+            include_resource_paths: true,
+            output_name: None,
+        }
+    }
 
     #[test]
     fn rewrites_whisper_cpp_json_into_sentence_segments() {
@@ -2681,5 +3139,40 @@ mod tests {
         });
 
         assert_eq!(settings.language, "ja");
+    }
+
+    #[test]
+    fn renders_srt_caption_export() {
+        let rendered = render_srt_export(&export_test_session()).expect("srt should render");
+
+        assert!(rendered.starts_with("1\n00:00:00,000 --> 00:00:02,500\n"));
+        assert!(rendered.contains("2\n00:00:02,500 --> 00:00:05,000\n"));
+        assert!(rendered.contains("We discuss consensus."));
+    }
+
+    #[test]
+    fn renders_json_export_with_schema_and_resources() {
+        let session = export_test_session();
+        let rendered = render_json_export(&session, &export_request(SessionExportFormat::Json))
+            .expect("json should render");
+
+        assert!(rendered.contains("\"schemaVersion\": 1"));
+        assert!(rendered.contains("\"audioFilePaths\""));
+        assert!(rendered.contains("\"Welcome to the lecture.\""));
+    }
+
+    #[test]
+    fn renders_lecture_notes_template_with_transcript_appendix() {
+        let session = export_test_session();
+        let rendered = render_lecture_notes_export(
+            &session,
+            &export_request(SessionExportFormat::LectureNotes),
+        )
+        .expect("notes should render");
+
+        assert!(rendered.contains("## Summary"));
+        assert!(rendered.contains("## Key Points"));
+        assert!(rendered.contains("## Transcript Appendix"));
+        assert!(rendered.contains("We discuss consensus."));
     }
 }

@@ -8,6 +8,8 @@ import type {
   ProcessingSettings,
   ResourceOverview,
   RuntimeStatus,
+  SessionExportRequest,
+  SessionExportResult,
   SessionSummary,
   TranscriptionModelInfo,
   TranscriptionSettings,
@@ -66,6 +68,10 @@ export function listSessionSummaries() {
 
 export function getSession(id: string) {
   return invoke<LectureSession>("get_session", { id });
+}
+
+export function exportSessionDeliverable(request: SessionExportRequest) {
+  return invoke<SessionExportResult>("export_session_deliverable", { request });
 }
 
 export function updateSessionTitle(sessionId: string, title: string) {

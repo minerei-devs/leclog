@@ -132,6 +132,7 @@ fn main() {
             commands::session_commands::resume_session_recording,
             commands::session_commands::stop_session_recording,
             commands::session_commands::polish_session_transcript,
+            commands::session_commands::export_session_deliverable,
             commands::session_commands::save_session
         ])
         .run(tauri::generate_context!())

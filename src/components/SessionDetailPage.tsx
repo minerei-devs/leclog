@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Pencil, Trash2, X } from "lucide-react";
+import { Check, Download, Pencil, Trash2, X } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useRecentState } from "../hooks/useRecentState";
 import { useSessionPolling } from "../hooks/useSessionPolling";
@@ -19,6 +19,7 @@ import { Input } from "./ui/input";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SessionArtifacts } from "./SessionArtifacts";
 import { SessionAudioReviewBar, type AudioSeekRequest } from "./SessionAudioReviewBar";
+import { SessionExportDialog } from "./SessionExportDialog";
 import { SessionStatsStrip } from "./SessionStatsStrip";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptPanel } from "./TranscriptPanel";
@@ -37,6 +38,7 @@ export function SessionDetailPage() {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [isSavingTitle, setIsSavingTitle] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<SessionDetailTab>("content");
   const [activeTimeMs, setActiveTimeMs] = useState<number | null>(null);
   const [seekRequest, setSeekRequest] = useState<AudioSeekRequest | null>(null);
@@ -366,6 +368,16 @@ export function SessionDetailPage() {
             <StatusBadge status={session.status} />
             <Button
               type="button"
+              variant="outline"
+              size="sm"
+              title="Export transcript, captions, JSON, or lecture notes."
+              onClick={() => setIsExportDialogOpen(true)}
+            >
+              <Download className="size-3.5" />
+              Export
+            </Button>
+            <Button
+              type="button"
               variant="destructive"
               size="icon-sm"
               aria-label="Delete session"
@@ -516,6 +528,11 @@ export function SessionDetailPage() {
         onConfirm={() => void handleDeleteSession()}
       />
 
+      <SessionExportDialog
+        session={session}
+        open={isExportDialogOpen}
+        onClose={() => setIsExportDialogOpen(false)}
+      />
     </div>
   );
 }
