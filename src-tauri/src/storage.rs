@@ -339,6 +339,25 @@ fn managed_whisper_cli_path(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_runtime_dir(app)?.join(whisper_runtime_file_name()))
 }
 
+pub fn is_managed_whisper_cli_path(app: &AppHandle, path: &Path) -> bool {
+    managed_whisper_cli_path(app)
+        .map(|managed_path| managed_path == path)
+        .unwrap_or(false)
+}
+
+pub fn delete_managed_whisper_runtime(app: &AppHandle) -> Result<()> {
+    let path = managed_whisper_cli_path(app)?;
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| {
+            format!(
+                "Failed to remove the managed whisper runtime at {}.",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn processing_settings_path(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_data_dir(app)?.join(PROCESSING_SETTINGS_FILE_NAME))
 }

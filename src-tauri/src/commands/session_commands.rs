@@ -265,6 +265,11 @@ fn ensure_whisper_runtime_ready(app: &AppHandle, task_id: &str) -> Result<(), St
         return Ok(());
     }
 
+    if storage::is_managed_whisper_cli_path(app, &whisper_cli_path) {
+        storage::delete_managed_whisper_runtime(app)
+            .map_err(|error| format!("Failed to remove unusable whisper-cli: {error}"))?;
+    }
+
     let task_state = app.state::<TranscriptionTaskState>();
     task_state
         .progress_task(

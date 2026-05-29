@@ -404,6 +404,13 @@ jobs:
             -B "$workDir/build" `
             -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_SHARED_LIBS=OFF `
+            -DGGML_NATIVE=OFF `
+            -DGGML_SSE42=OFF `
+            -DGGML_AVX=OFF `
+            -DGGML_AVX2=OFF `
+            -DGGML_BMI2=OFF `
+            -DGGML_AVX_VNNI=OFF `
+            -DGGML_AVX512=OFF `
             -DWHISPER_BUILD_TESTS=OFF `
             -DWHISPER_BUILD_SERVER=OFF
 
