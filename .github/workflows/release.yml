@@ -454,6 +454,91 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
 
+      - name: Merge Windows updater manifest
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $bundleDir = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $windowsManifest = Join-Path $bundleDir "latest.json"
+          if (-not (Test-Path $windowsManifest)) {
+            throw "Windows updater manifest was not generated at $windowsManifest."
+          }
+
+          $installer = Get-ChildItem -Path $bundleDir -File -Filter "*.exe" |
+            Sort-Object Name |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw "Windows NSIS installer was not found in $bundleDir."
+          }
+
+          $manifestDir = Join-Path $env:RUNNER_TEMP "windows-updater-manifest"
+          Remove-Item -Recurse -Force $manifestDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $manifestDir | Out-Null
+
+          gh release download $env:RELEASE_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --pattern latest.json `
+            --dir $manifestDir
+
+          $existingManifest = Join-Path $manifestDir "latest.json"
+          if (-not (Test-Path $existingManifest)) {
+            throw "Existing release latest.json was not found; macOS updater manifest should be published first."
+          }
+
+          $env:EXISTING_MANIFEST = $existingManifest
+          $env:WINDOWS_MANIFEST = $windowsManifest
+          $env:INSTALLER_NAME = $installer.Name
+          $env:MERGED_MANIFEST = $existingManifest
+
+          @'
+          const fs = require("fs");
+
+          function readJson(path) {
+            return JSON.parse(fs.readFileSync(path, "utf8"));
+          }
+
+          function encodeAssetName(name) {
+            return encodeURIComponent(name).replace(/%2F/g, "/");
+          }
+
+          const existing = readJson(process.env.EXISTING_MANIFEST);
+          const windows = readJson(process.env.WINDOWS_MANIFEST);
+          const tag = process.env.RELEASE_TAG;
+          const version = existing.version || windows.version || tag.replace(/^v/, "");
+          const platforms = { ...(existing.platforms || {}) };
+          const windowsPlatforms = windows.platforms || {};
+          const windowsKeys = Object.keys(windowsPlatforms).filter((key) => key.startsWith("windows-"));
+
+          if (windowsKeys.length === 0) {
+            throw new Error("Generated Windows latest.json did not contain any windows-* platforms.");
+          }
+
+          for (const key of windowsKeys) {
+            const signature = windowsPlatforms[key]?.signature;
+            if (!signature) {
+              throw new Error(`Generated Windows latest.json is missing a signature for ${key}.`);
+            }
+
+            platforms[key] = {
+              signature,
+              url: `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${tag}/${encodeAssetName(process.env.INSTALLER_NAME)}`,
+            };
+          }
+
+          const merged = {
+            version,
+            notes: existing.notes ?? windows.notes ?? "",
+            pub_date: existing.pub_date ?? windows.pub_date ?? new Date().toISOString(),
+            platforms,
+          };
+
+          fs.writeFileSync(process.env.MERGED_MANIFEST, `${JSON.stringify(merged, null, 2)}\n`);
+          '@ | node
+
       - name: Upload Windows release assets
         shell: pwsh
         env:
@@ -470,6 +555,8 @@ jobs:
           $artifactDir = Join-Path $env:RUNNER_TEMP "windows-runtime-artifacts"
           $assets += (Join-Path $artifactDir "whisper-cli-x86_64-pc-windows-msvc.exe")
           $assets += (Join-Path $artifactDir "whisper-cli-x86_64-pc-windows-msvc.exe.sha256")
+          $manifestDir = Join-Path $env:RUNNER_TEMP "windows-updater-manifest"
+          $assets += (Join-Path $manifestDir "latest.json")
 
           gh release upload $env:RELEASE_TAG $assets `
             --repo $env:GITHUB_REPOSITORY `
