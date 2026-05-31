@@ -16,6 +16,59 @@ import type {
   TranscriptSegment,
 } from "../types/session";
 
+interface CachedInvokeEntry<T> {
+  value?: T;
+  valueAt: number;
+  promise?: Promise<T>;
+}
+
+const cachedInvokes = new Map<string, CachedInvokeEntry<unknown>>();
+
+function invokeCached<T>(
+  cacheKey: string,
+  command: string,
+  args?: Record<string, unknown>,
+  ttlMs = 750,
+) {
+  const now = Date.now();
+  const cached = cachedInvokes.get(cacheKey) as CachedInvokeEntry<T> | undefined;
+
+  if (cached?.promise) {
+    return cached.promise;
+  }
+
+  if (cached?.value !== undefined && now - cached.valueAt < ttlMs) {
+    return Promise.resolve(cached.value);
+  }
+
+  const entry: CachedInvokeEntry<T> = cached ?? {
+    valueAt: 0,
+  };
+  const promise = invoke<T>(command, args)
+    .then((value) => {
+      entry.value = value;
+      entry.valueAt = Date.now();
+      entry.promise = undefined;
+      return value;
+    })
+    .catch((error) => {
+      entry.promise = undefined;
+      throw error;
+    });
+
+  entry.promise = promise;
+  cachedInvokes.set(cacheKey, entry as CachedInvokeEntry<unknown>);
+  return promise;
+}
+
+function clearCachedInvokes(...prefixes: string[]) {
+  for (const key of cachedInvokes.keys()) {
+    if (prefixes.some((prefix) => key.startsWith(prefix))) {
+      cachedInvokes.delete(key);
+    }
+  }
+}
+
 export function createSession(
   title?: string,
   captureSource?: CaptureSource,
@@ -28,12 +81,16 @@ export function createSession(
     preferredLanguage:
       settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
     promptTerms: settings?.promptTerms?.trim() || null,
+    whisperRuntimePreference: settings?.whisperRuntimePreference ?? null,
     qualityPreset: settings?.qualityPreset ?? null,
     chunkDurationMinutes: settings?.chunkDurationMinutes ?? null,
     chunkOverlapSeconds: settings?.chunkOverlapSeconds ?? null,
     whisperThreads: settings?.whisperThreads ?? null,
     maxParallelChunks: settings?.maxParallelChunks ?? null,
     liveRefreshIntervalSeconds: settings?.liveRefreshIntervalSeconds ?? null,
+  }).then((session) => {
+    clearCachedInvokes("sessions", "session:");
+    return session;
   });
 }
 
@@ -49,25 +106,29 @@ export function importMediaSession(
     preferredLanguage:
       settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
     promptTerms: settings?.promptTerms?.trim() || null,
+    whisperRuntimePreference: settings?.whisperRuntimePreference ?? null,
     qualityPreset: settings?.qualityPreset ?? null,
     chunkDurationMinutes: settings?.chunkDurationMinutes ?? null,
     chunkOverlapSeconds: settings?.chunkOverlapSeconds ?? null,
     whisperThreads: settings?.whisperThreads ?? null,
     maxParallelChunks: settings?.maxParallelChunks ?? null,
     liveRefreshIntervalSeconds: settings?.liveRefreshIntervalSeconds ?? null,
+  }).then((session) => {
+    clearCachedInvokes("sessions", "session:");
+    return session;
   });
 }
 
 export function listSessions() {
-  return invoke<LectureSession[]>("list_sessions");
+  return invokeCached<LectureSession[]>("sessions:full", "list_sessions");
 }
 
 export function listSessionSummaries() {
-  return invoke<SessionSummary[]>("list_session_summaries");
+  return invokeCached<SessionSummary[]>("sessions:summaries", "list_session_summaries");
 }
 
 export function getSession(id: string) {
-  return invoke<LectureSession>("get_session", { id });
+  return invokeCached<LectureSession>(`session:${id}`, "get_session", { id });
 }
 
 export function exportSessionDeliverable(request: SessionExportRequest) {
@@ -78,34 +139,57 @@ export function updateSessionTitle(sessionId: string, title: string) {
   return invoke<LectureSession>("update_session_title", {
     sessionId,
     title: title.trim(),
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
 export function getPlatformCapabilities() {
-  return invoke<PlatformCapabilities>("get_platform_capabilities");
+  return invokeCached<PlatformCapabilities>(
+    "platform-capabilities",
+    "get_platform_capabilities",
+    undefined,
+    60_000,
+  );
 }
 
 export function listTranscriptionModels() {
-  return invoke<TranscriptionModelInfo[]>("list_transcription_models");
+  return invokeCached<TranscriptionModelInfo[]>(
+    "transcription-models:installed",
+    "list_transcription_models",
+  );
 }
 
 export function listAvailableTranscriptionModels() {
-  return invoke<ManagedTranscriptionModel[]>("list_available_transcription_models");
+  return invokeCached<ManagedTranscriptionModel[]>(
+    "transcription-models:available",
+    "list_available_transcription_models",
+  );
 }
 
 export function downloadTranscriptionModel(modelId: string) {
   return invoke<void>("download_transcription_model", {
     modelId,
+  }).then((result) => {
+    clearCachedInvokes("transcription-models", "runtime-status", "background-tasks");
+    return result;
   });
 }
 
 export function prepareTranscriptionRuntime() {
-  return invoke<void>("prepare_transcription_runtime");
+  return invoke<void>("prepare_transcription_runtime").then((result) => {
+    clearCachedInvokes("transcription-models", "runtime-status", "background-tasks");
+    return result;
+  });
 }
 
 export function deleteTranscriptionModel(modelId: string) {
   return invoke<void>("delete_transcription_model", {
     modelId,
+  }).then((result) => {
+    clearCachedInvokes("transcription-models", "runtime-status");
+    return result;
   });
 }
 
@@ -113,6 +197,9 @@ export function appendSegment(sessionId: string, segment: TranscriptSegment) {
   return invoke<LectureSession>("append_segment", {
     sessionId,
     segment,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
@@ -125,6 +212,9 @@ export function beginAudioSegment(
     sessionId,
     mimeType,
     extension,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
@@ -138,6 +228,9 @@ export function appendAudioChunk(sessionId: string, chunk: number[]) {
 export function finishAudioSegment(sessionId: string) {
   return invoke<LectureSession>("finish_audio_segment", {
     sessionId,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
@@ -150,6 +243,9 @@ export function initializeLivePreview(
     sessionId,
     sampleRate,
     reset,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
@@ -170,30 +266,45 @@ export function queueLiveTranscriptRefresh(
     preferredLanguage:
       settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
     promptTerms: settings?.promptTerms?.trim() || null,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`, "background-tasks");
+    return session;
   });
 }
 
 export function startSessionRecording(sessionId: string) {
   return invoke<LectureSession>("start_session_recording", {
     sessionId,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
 export function pauseSessionRecording(sessionId: string) {
   return invoke<LectureSession>("pause_session_recording", {
     sessionId,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
 export function resumeSessionRecording(sessionId: string) {
   return invoke<LectureSession>("resume_session_recording", {
     sessionId,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
 export function stopSessionRecording(sessionId: string) {
   return invoke<LectureSession>("stop_session_recording", {
     sessionId,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`, "background-tasks");
+    return session;
   });
 }
 
@@ -201,6 +312,9 @@ export function setSessionStatus(sessionId: string, status: string) {
   return invoke<LectureSession>("set_session_status", {
     sessionId,
     status,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
@@ -214,18 +328,25 @@ export function saveSession(
     preferredLanguage:
       settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
     promptTerms: settings?.promptTerms?.trim() || null,
+    whisperRuntimePreference: settings?.whisperRuntimePreference ?? null,
     qualityPreset: settings?.qualityPreset ?? null,
     chunkDurationMinutes: settings?.chunkDurationMinutes ?? null,
     chunkOverlapSeconds: settings?.chunkOverlapSeconds ?? null,
     whisperThreads: settings?.whisperThreads ?? null,
     maxParallelChunks: settings?.maxParallelChunks ?? null,
     liveRefreshIntervalSeconds: settings?.liveRefreshIntervalSeconds ?? null,
+  }).then((result) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`, "background-tasks");
+    return result;
   });
 }
 
 export function polishSessionTranscript(sessionId: string) {
   return invoke<LectureSession>("polish_session_transcript", {
     sessionId,
+  }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`);
+    return session;
   });
 }
 
@@ -239,29 +360,39 @@ export function saveSessionWithProcessingSettings(
     preferredLanguage:
       settings?.preferredLanguage?.trim() || settings?.language?.trim() || null,
     promptTerms: settings?.promptTerms?.trim() || null,
+    whisperRuntimePreference: settings?.whisperRuntimePreference ?? null,
     qualityPreset: settings?.qualityPreset ?? null,
     chunkDurationMinutes: settings?.chunkDurationMinutes ?? null,
     chunkOverlapSeconds: settings?.chunkOverlapSeconds ?? null,
     whisperThreads: settings?.whisperThreads ?? null,
     maxParallelChunks: settings?.maxParallelChunks ?? null,
     liveRefreshIntervalSeconds: settings?.liveRefreshIntervalSeconds ?? null,
+  }).then((result) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`, "background-tasks");
+    return result;
   });
 }
 
 export function getRuntimeStatus() {
-  return invoke<RuntimeStatus>("get_runtime_status");
+  return invokeCached<RuntimeStatus>("runtime-status", "get_runtime_status", undefined, 5_000);
 }
 
 export function listResources() {
-  return invoke<ResourceOverview>("list_resources");
+  return invokeCached<ResourceOverview>("resources", "list_resources", undefined, 1_000);
 }
 
 export function deleteSession(sessionId: string) {
-  return invoke<void>("delete_session", { sessionId });
+  return invoke<void>("delete_session", { sessionId }).then((result) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`, "resources", "background-tasks");
+    return result;
+  });
 }
 
 export function cleanupSessionIntermediates(sessionId: string) {
-  return invoke<LectureSession>("cleanup_session_intermediates", { sessionId });
+  return invoke<LectureSession>("cleanup_session_intermediates", { sessionId }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`, "resources");
+    return session;
+  });
 }
 
 export function deleteResource(
@@ -273,6 +404,9 @@ export function deleteResource(
     path,
     sessionId: sessionId ?? null,
     modelId: modelId ?? null,
+  }).then((overview) => {
+    clearCachedInvokes("sessions", "session:", "resources", "transcription-models", "runtime-status");
+    return overview;
   });
 }
 
@@ -281,19 +415,30 @@ export function revealResource(path: string) {
 }
 
 export function listBackgroundTasks() {
-  return invoke<BackgroundTask[]>("list_background_tasks");
+  return invokeCached<BackgroundTask[]>("background-tasks", "list_background_tasks", undefined, 500);
 }
 
 export function cancelBackgroundTask(taskId: string) {
-  return invoke<BackgroundTask>("cancel_background_task", { taskId });
+  return invoke<BackgroundTask>("cancel_background_task", { taskId }).then((task) => {
+    clearCachedInvokes("sessions", "background-tasks");
+    return task;
+  });
 }
 
 export function retrySessionProcessing(sessionId: string) {
-  return invoke<LectureSession>("retry_session_processing", { sessionId });
+  return invoke<LectureSession>("retry_session_processing", { sessionId }).then((session) => {
+    clearCachedInvokes("sessions", `session:${sessionId}`, "background-tasks");
+    return session;
+  });
 }
 
 export function getProcessingSettings() {
-  return invoke<ProcessingSettings>("get_processing_settings");
+  return invokeCached<ProcessingSettings>(
+    "processing-settings",
+    "get_processing_settings",
+    undefined,
+    5_000,
+  );
 }
 
 export function patchProcessingSettings(patch: Partial<ProcessingSettings>) {
@@ -303,11 +448,15 @@ export function patchProcessingSettings(patch: Partial<ProcessingSettings>) {
     clearPreferredModelId: patch.preferredModelId === null,
     language: patch.language ?? null,
     promptTerms: patch.promptTerms ?? null,
+    whisperRuntimePreference: patch.whisperRuntimePreference ?? null,
     chunkDurationMinutes: patch.chunkDurationMinutes ?? null,
     chunkOverlapSeconds: patch.chunkOverlapSeconds ?? null,
     whisperThreads: patch.whisperThreads ?? null,
     clearWhisperThreads: patch.whisperThreads === null,
     maxParallelChunks: patch.maxParallelChunks ?? null,
     liveRefreshIntervalSeconds: patch.liveRefreshIntervalSeconds ?? null,
+  }).then((settings) => {
+    clearCachedInvokes("processing-settings", "runtime-status");
+    return settings;
   });
 }

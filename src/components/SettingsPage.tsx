@@ -18,7 +18,6 @@ import {
   XCircle,
 } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
-import { check } from "@tauri-apps/plugin-updater";
 import type { DownloadEvent, Update } from "@tauri-apps/plugin-updater";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -54,6 +53,11 @@ import {
   summarizeTaskError,
   taskFailureMeta,
 } from "@/lib/tasks";
+import {
+  checkForLeclogUpdate,
+  isUpdaterPlatformSupported,
+  unsupportedUpdaterPlatformMessage,
+} from "@/lib/updater";
 import type {
   BackgroundTask,
   ManagedTranscriptionModel,
@@ -63,6 +67,7 @@ import type {
   ResourceOverview,
   RuntimeStatus,
   TranscriptionModelInfo,
+  WhisperRuntimePreference,
 } from "@/types/session";
 import type { TranscriptionLanguageProfileId } from "@/lib/transcriptionLanguageProfiles";
 import { useAppSettings } from "@/hooks/useAppSettings";
@@ -102,6 +107,12 @@ const presetLabels: Record<ProcessingQualityPreset, string> = {
   balanced: "Balanced",
   accurate: "Accurate",
   custom: "Custom",
+};
+
+const whisperRuntimePreferenceLabels: Record<WhisperRuntimePreference, string> = {
+  auto: "Auto",
+  cpu: "CPU build",
+  gpu: "GPU build",
 };
 
 const resourceKindLabels: Record<ResourceKind, string> = {
@@ -599,11 +610,20 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
   }
 
   async function handleCheckForUpdate() {
+    if (!isUpdaterPlatformSupported()) {
+      setPendingUpdate(null);
+      setUpdateProgress({ downloadedBytes: 0, totalBytes: null });
+      setUpdateStatus("none");
+      setUpdateMessage(unsupportedUpdaterPlatformMessage);
+      setError(null);
+      return;
+    }
+
     setUpdateStatus("checking");
     setUpdateMessage(null);
     setError(null);
     try {
-      const update = await check({ timeout: 30_000 });
+      const update = await checkForLeclogUpdate(10_000);
       setPendingUpdate(update);
       setUpdateProgress({ downloadedBytes: 0, totalBytes: null });
       if (update) {
@@ -951,6 +971,30 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
                   ))}
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium text-slate-700">Runtime build</span>
+                    <select
+                      className="h-9 rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
+                      value={processingSettings.whisperRuntimePreference}
+                      onChange={(event) =>
+                        void updateSettings({
+                          whisperRuntimePreference: event.target.value as WhisperRuntimePreference,
+                        })
+                      }
+                      disabled={!settingsLoaded}
+                    >
+                      {(Object.keys(whisperRuntimePreferenceLabels) as WhisperRuntimePreference[]).map(
+                        (preference) => (
+                          <option key={preference} value={preference}>
+                            {whisperRuntimePreferenceLabels[preference]}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                    <span className="truncate text-xs text-slate-500">
+                      Auto uses an available GPU build when present, then falls back to the default CPU build.
+                    </span>
+                  </label>
                   <label className="grid gap-1 text-sm">
                     <span className="font-medium text-slate-700">Default language</span>
                     <select

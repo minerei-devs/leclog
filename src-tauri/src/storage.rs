@@ -21,7 +21,7 @@ use crate::{
         BackgroundTask, LectureSession, ManagedTranscriptionModel, ModelDownloadStatus,
         ProcessingQualityPreset, ProcessingSettings, SessionExportFormat, SessionExportRequest,
         SessionExportResult, SessionStatus, TaskFailureLog, TranscriptExportLayer,
-        TranscriptSegment, TranscriptionModelInfo,
+        TranscriptSegment, TranscriptionModelInfo, WhisperRuntimePreference,
     },
     state::TranscriptionTaskState,
 };
@@ -331,29 +331,68 @@ fn target_binary_file_name(binary_name: &str) -> String {
     format!("{}-{}{}", binary_name, current_target_triple(), extension)
 }
 
-fn whisper_runtime_file_name() -> String {
+fn target_variant_binary_file_name(binary_name: &str, variant: &str) -> String {
+    let extension = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    format!(
+        "{}-{}-{}{}",
+        binary_name,
+        variant,
+        current_target_triple(),
+        extension
+    )
+}
+
+fn whisper_runtime_file_name(preference: &WhisperRuntimePreference) -> String {
+    if preference == &WhisperRuntimePreference::Gpu {
+        return target_variant_binary_file_name("whisper-cli", "gpu");
+    }
+
     target_binary_file_name("whisper-cli")
 }
 
-fn managed_whisper_cli_path(app: &AppHandle) -> Result<PathBuf> {
-    Ok(app_runtime_dir(app)?.join(whisper_runtime_file_name()))
+fn whisper_runtime_candidate_file_names(preference: &WhisperRuntimePreference) -> Vec<String> {
+    match preference {
+        WhisperRuntimePreference::Gpu => {
+            vec![target_variant_binary_file_name("whisper-cli", "gpu")]
+        }
+        WhisperRuntimePreference::Cpu => vec![target_binary_file_name("whisper-cli")],
+        WhisperRuntimePreference::Auto => vec![
+            target_variant_binary_file_name("whisper-cli", "gpu"),
+            target_binary_file_name("whisper-cli"),
+        ],
+    }
+}
+
+fn managed_whisper_cli_path(
+    app: &AppHandle,
+    preference: &WhisperRuntimePreference,
+) -> Result<PathBuf> {
+    Ok(app_runtime_dir(app)?.join(whisper_runtime_file_name(preference)))
 }
 
 pub fn is_managed_whisper_cli_path(app: &AppHandle, path: &Path) -> bool {
-    managed_whisper_cli_path(app)
+    [WhisperRuntimePreference::Gpu, WhisperRuntimePreference::Cpu]
+        .iter()
+        .filter_map(|preference| managed_whisper_cli_path(app, preference).ok())
         .map(|managed_path| managed_path == path)
-        .unwrap_or(false)
+        .any(|matches| matches)
 }
 
 pub fn delete_managed_whisper_runtime(app: &AppHandle) -> Result<()> {
-    let path = managed_whisper_cli_path(app)?;
-    if path.exists() {
-        fs::remove_file(&path).with_context(|| {
-            format!(
-                "Failed to remove the managed whisper runtime at {}.",
-                path.display()
-            )
-        })?;
+    for preference in [WhisperRuntimePreference::Gpu, WhisperRuntimePreference::Cpu] {
+        let path = managed_whisper_cli_path(app, &preference)?;
+        if path.exists() {
+            fs::remove_file(&path).with_context(|| {
+                format!(
+                    "Failed to remove the managed whisper runtime at {}.",
+                    path.display()
+                )
+            })?;
+        }
     }
     Ok(())
 }
@@ -654,7 +693,21 @@ fn command_candidate_available(candidate: &Path, probe_arg: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn resolve_whisper_cli_path(app: &AppHandle) -> PathBuf {
+pub fn resolve_whisper_cli_path(app: &AppHandle, preference: &WhisperRuntimePreference) -> PathBuf {
+    let variant_env = match preference {
+        WhisperRuntimePreference::Gpu => Some("LECLOG_WHISPER_GPU_PATH"),
+        WhisperRuntimePreference::Cpu => Some("LECLOG_WHISPER_CPU_PATH"),
+        WhisperRuntimePreference::Auto => None,
+    };
+    if let Some(key) = variant_env {
+        if let Ok(path) = env::var(key) {
+            let candidate = PathBuf::from(path);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+
     if let Ok(path) = env::var("LECLOG_WHISPER_PATH") {
         let candidate = PathBuf::from(path);
         if candidate.exists() {
@@ -662,27 +715,34 @@ pub fn resolve_whisper_cli_path(app: &AppHandle) -> PathBuf {
         }
     }
 
-    if let Ok(candidate) = managed_whisper_cli_path(app) {
-        if candidate.exists() {
-            return candidate;
+    let candidate_file_names = whisper_runtime_candidate_file_names(preference);
+    if let Ok(runtime_dir) = app_runtime_dir(app) {
+        for file_name in &candidate_file_names {
+            let candidate = runtime_dir.join(file_name);
+            if candidate.exists() {
+                return candidate;
+            }
         }
     }
 
-    let target_binary_name = target_binary_file_name("whisper-cli");
-    let local_sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join(&target_binary_name);
-    if local_sidecar.exists() {
-        return local_sidecar;
+    for file_name in &candidate_file_names {
+        let local_sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join(file_name);
+        if local_sidecar.exists() {
+            return local_sidecar;
+        }
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
-        for candidate in [
-            resource_dir.join(&target_binary_name),
-            resource_dir.join("binaries").join(&target_binary_name),
-        ] {
-            if candidate.exists() {
-                return candidate;
+        for file_name in &candidate_file_names {
+            for candidate in [
+                resource_dir.join(file_name),
+                resource_dir.join("binaries").join(file_name),
+            ] {
+                if candidate.exists() {
+                    return candidate;
+                }
             }
         }
     }
@@ -950,18 +1010,34 @@ where
     Ok(destination_path)
 }
 
-fn whisper_runtime_source_url() -> String {
-    env::var("LECLOG_WHISPER_RUNTIME_URL").unwrap_or_else(|_| {
-        format!(
-            "{WHISPER_RUNTIME_REPOSITORY_BASE_URL}/{}",
-            whisper_runtime_file_name()
-        )
-    })
+fn whisper_runtime_source_url(preference: &WhisperRuntimePreference) -> String {
+    let variant_env = match preference {
+        WhisperRuntimePreference::Gpu => Some("LECLOG_WHISPER_GPU_RUNTIME_URL"),
+        WhisperRuntimePreference::Cpu => Some("LECLOG_WHISPER_CPU_RUNTIME_URL"),
+        WhisperRuntimePreference::Auto => None,
+    };
+
+    variant_env
+        .and_then(|key| env::var(key).ok())
+        .or_else(|| env::var("LECLOG_WHISPER_RUNTIME_URL").ok())
+        .unwrap_or_else(|| {
+            format!(
+                "{WHISPER_RUNTIME_REPOSITORY_BASE_URL}/{}",
+                whisper_runtime_file_name(preference)
+            )
+        })
 }
 
-fn expected_whisper_runtime_sha256() -> Option<String> {
-    env::var("LECLOG_WHISPER_RUNTIME_SHA256")
-        .ok()
+fn expected_whisper_runtime_sha256(preference: &WhisperRuntimePreference) -> Option<String> {
+    let variant_env = match preference {
+        WhisperRuntimePreference::Gpu => Some("LECLOG_WHISPER_GPU_RUNTIME_SHA256"),
+        WhisperRuntimePreference::Cpu => Some("LECLOG_WHISPER_CPU_RUNTIME_SHA256"),
+        WhisperRuntimePreference::Auto => None,
+    };
+
+    variant_env
+        .and_then(|key| env::var(key).ok())
+        .or_else(|| env::var("LECLOG_WHISPER_RUNTIME_SHA256").ok())
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
 }
@@ -975,8 +1051,12 @@ fn parse_sha256_checksum(value: &str) -> Option<String> {
         .map(|value| value.to_ascii_lowercase())
 }
 
-fn fetch_whisper_runtime_sha256(client: &Client, source_url: &str) -> Result<String> {
-    if let Some(expected) = expected_whisper_runtime_sha256() {
+fn fetch_whisper_runtime_sha256(
+    client: &Client,
+    source_url: &str,
+    preference: &WhisperRuntimePreference,
+) -> Result<String> {
+    if let Some(expected) = expected_whisper_runtime_sha256(preference) {
         return Ok(expected);
     }
 
@@ -996,27 +1076,31 @@ fn fetch_whisper_runtime_sha256(client: &Client, source_url: &str) -> Result<Str
     })
 }
 
-pub fn download_whisper_runtime<F>(app: &AppHandle, mut on_progress: F) -> Result<PathBuf>
+pub fn download_whisper_runtime<F>(
+    app: &AppHandle,
+    preference: &WhisperRuntimePreference,
+    mut on_progress: F,
+) -> Result<PathBuf>
 where
     F: FnMut(u64, Option<u64>) -> Result<(), String>,
 {
-    let destination_path = managed_whisper_cli_path(app)?;
+    let destination_path = managed_whisper_cli_path(app, preference)?;
     if destination_path.exists() {
         return Ok(destination_path);
     }
 
     let runtime_dir = app_runtime_dir(app)?;
     fs::create_dir_all(&runtime_dir).context("Failed to create the runtime directory.")?;
-    let temp_path = runtime_dir.join(format!("{}.part", whisper_runtime_file_name()));
+    let temp_path = runtime_dir.join(format!("{}.part", whisper_runtime_file_name(preference)));
     if temp_path.exists() {
         let _ = fs::remove_file(&temp_path);
     }
 
-    let source_url = whisper_runtime_source_url();
+    let source_url = whisper_runtime_source_url(preference);
     let client = Client::builder()
         .build()
         .context("Failed to initialize the HTTP client.")?;
-    let expected_sha256 = fetch_whisper_runtime_sha256(&client, &source_url)?;
+    let expected_sha256 = fetch_whisper_runtime_sha256(&client, &source_url, preference)?;
     let mut response = client
         .get(&source_url)
         .send()
@@ -1233,8 +1317,13 @@ fn run_ffmpeg(app: &AppHandle, args: &[&str], task_id: Option<&str>) -> Result<(
     run_command_with_optional_task(app, &ffmpeg_path, args, task_id, "ffmpeg")
 }
 
-fn run_whisper_cli(app: &AppHandle, args: &[&str], task_id: Option<&str>) -> Result<()> {
-    let whisper_cli_path = resolve_whisper_cli_path(app);
+fn run_whisper_cli(
+    app: &AppHandle,
+    preference: &WhisperRuntimePreference,
+    args: &[&str],
+    task_id: Option<&str>,
+) -> Result<()> {
+    let whisper_cli_path = resolve_whisper_cli_path(app, preference);
     run_command_with_optional_task(app, &whisper_cli_path, args, task_id, "whisper-cli")
 }
 
@@ -2355,6 +2444,7 @@ fn transcribe_audio_path(
     preferred_model_id: Option<&str>,
     language: &str,
     prompt: Option<&str>,
+    runtime_preference: &WhisperRuntimePreference,
     whisper_threads: u32,
     max_end_ms: Option<u64>,
     task_id: Option<&str>,
@@ -2397,7 +2487,7 @@ fn transcribe_audio_path(
     }
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
 
-    run_whisper_cli(app, &arg_refs, task_id)?;
+    run_whisper_cli(app, runtime_preference, &arg_refs, task_id)?;
 
     let raw_transcript = fs::read(&transcript_json_path).with_context(|| {
         format!(
@@ -2474,6 +2564,7 @@ where
     let prompt = resolve_whisper_prompt(Some(&settings.prompt_terms));
     let preferred_model_id = resolve_preferred_model_for_settings(app, &settings);
     let whisper_threads = resolve_whisper_threads(&settings);
+    let runtime_preference = settings.whisper_runtime_preference.clone();
     let chunks = split_normalized_audio_for_transcript(app, session, &settings, task_id)?;
     let total_chunks = chunks.len().max(1);
     let mut merged_segments = Vec::new();
@@ -2489,6 +2580,7 @@ where
             preferred_model_id.as_deref(),
             &language,
             prompt.as_deref(),
+            &runtime_preference,
             whisper_threads,
             None,
             task_id,
@@ -2509,6 +2601,7 @@ where
             preferred_model_id.as_deref(),
             &language,
             prompt.as_deref(),
+            &runtime_preference,
             whisper_threads,
             Some(chunk.duration_ms),
             task_id,
@@ -2632,6 +2725,7 @@ pub fn transcribe_live_preview_audio(
         preferred_model_id,
         &language,
         prompt.as_deref(),
+        &ProcessingSettings::default().whisper_runtime_preference,
         resolve_whisper_threads(&ProcessingSettings::default()),
         max_end_ms,
         None,
@@ -2949,7 +3043,7 @@ mod tests {
     use crate::models::{
         CaptureSource, LectureSession, ProcessingQualityPreset, ProcessingSettings,
         SessionExportFormat, SessionExportRequest, SessionStatus, TranscriptExportLayer,
-        TranscriptPhase, TranscriptSegment,
+        TranscriptPhase, TranscriptSegment, WhisperRuntimePreference,
     };
 
     fn export_test_session() -> LectureSession {
@@ -3100,6 +3194,7 @@ mod tests {
             preferred_model_id: Some(String::from("  ggml-small.bin  ")),
             language: String::from(" ja "),
             prompt_terms: String::from("  lecture prompt  "),
+            whisper_runtime_preference: WhisperRuntimePreference::Gpu,
             chunk_duration_minutes: 99,
             chunk_overlap_seconds: 999,
             whisper_threads: Some(99),
@@ -3114,6 +3209,10 @@ mod tests {
         );
         assert_eq!(settings.language, "ja");
         assert_eq!(settings.prompt_terms, "lecture prompt");
+        assert_eq!(
+            settings.whisper_runtime_preference,
+            WhisperRuntimePreference::Gpu
+        );
         assert_eq!(settings.chunk_duration_minutes, 10);
         assert_eq!(settings.chunk_overlap_seconds, 20);
         assert_eq!(settings.whisper_threads, Some(16));
@@ -3128,6 +3227,7 @@ mod tests {
             preferred_model_id: None,
             language: String::new(),
             prompt_terms: String::new(),
+            whisper_runtime_preference: WhisperRuntimePreference::Auto,
             chunk_duration_minutes: 0,
             chunk_overlap_seconds: 500,
             whisper_threads: Some(0),
@@ -3150,6 +3250,7 @@ mod tests {
             preferred_model_id: None,
             language: String::from(" jp "),
             prompt_terms: String::new(),
+            whisper_runtime_preference: WhisperRuntimePreference::Auto,
             chunk_duration_minutes: 10,
             chunk_overlap_seconds: 20,
             whisper_threads: None,

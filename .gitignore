@@ -2,3 +2,6 @@ node_modules
 dist
 .playwright-cli
 output
+.codex-tools
+src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+src-tauri/gen/schemas/windows-schema.json

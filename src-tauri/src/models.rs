@@ -258,6 +258,25 @@ impl ProcessingQualityPreset {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WhisperRuntimePreference {
+    Auto,
+    Cpu,
+    Gpu,
+}
+
+impl WhisperRuntimePreference {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "cpu" => Ok(Self::Cpu),
+            "gpu" => Ok(Self::Gpu),
+            other => Err(format!("Unsupported Whisper runtime preference: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessingSettings {
@@ -265,6 +284,8 @@ pub struct ProcessingSettings {
     pub preferred_model_id: Option<String>,
     pub language: String,
     pub prompt_terms: String,
+    #[serde(default = "default_whisper_runtime_preference")]
+    pub whisper_runtime_preference: WhisperRuntimePreference,
     pub chunk_duration_minutes: u32,
     pub chunk_overlap_seconds: u32,
     pub whisper_threads: Option<u32>,
@@ -279,6 +300,7 @@ impl Default for ProcessingSettings {
             preferred_model_id: None,
             language: String::from("auto"),
             prompt_terms: String::new(),
+            whisper_runtime_preference: WhisperRuntimePreference::Auto,
             chunk_duration_minutes: 10,
             chunk_overlap_seconds: 20,
             whisper_threads: None,
@@ -286,6 +308,10 @@ impl Default for ProcessingSettings {
             live_refresh_interval_seconds: 20,
         }
     }
+}
+
+fn default_whisper_runtime_preference() -> WhisperRuntimePreference {
+    WhisperRuntimePreference::Auto
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

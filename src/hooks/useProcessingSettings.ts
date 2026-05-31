@@ -7,6 +7,7 @@ const fallbackProcessingSettings: ProcessingSettings = {
   preferredModelId: null,
   language: "auto",
   promptTerms: "",
+  whisperRuntimePreference: "auto",
   chunkDurationMinutes: 10,
   chunkOverlapSeconds: 20,
   whisperThreads: null,

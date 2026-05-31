@@ -135,12 +135,14 @@ export interface TranscriptionSettings {
 }
 
 export type ProcessingQualityPreset = "fast" | "balanced" | "accurate" | "custom";
+export type WhisperRuntimePreference = "auto" | "cpu" | "gpu";
 
 export interface ProcessingSettings {
   qualityPreset: ProcessingQualityPreset;
   preferredModelId: string | null;
   language: string;
   promptTerms: string;
+  whisperRuntimePreference: WhisperRuntimePreference;
   chunkDurationMinutes: number;
   chunkOverlapSeconds: number;
   whisperThreads: number | null;

@@ -18,9 +18,9 @@ import {
   XCircle,
 } from "lucide-react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
-import { check } from "@tauri-apps/plugin-updater";
 import { formatBytes, formatDuration } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { checkForLeclogUpdate, isUpdaterPlatformSupported } from "@/lib/updater";
 import {
   cancelBackgroundTask,
   downloadTranscriptionModel,
@@ -353,25 +353,32 @@ export function AppShell({ children }: PropsWithChildren) {
   }, []);
 
   useEffect(() => {
-    if (!appSettingsLoaded || !appSettings.autoCheckUpdates) {
+    if (
+      !appSettingsLoaded ||
+      !appSettings.autoCheckUpdates ||
+      !isUpdaterPlatformSupported()
+    ) {
       return;
     }
 
     let isMounted = true;
-    void check({ timeout: 15_000 })
-      .then(async (update) => {
-        if (!update) {
-          return;
-        }
-        if (isMounted) {
-          setAvailableUpdateVersion(update.version);
-        }
-        await update.close();
-      })
-      .catch(() => {});
+    const timeoutId = window.setTimeout(() => {
+      void checkForLeclogUpdate(5_000)
+        .then(async (update) => {
+          if (!update) {
+            return;
+          }
+          if (isMounted) {
+            setAvailableUpdateVersion(update.version);
+          }
+          await update.close();
+        })
+        .catch(() => {});
+    }, 2_500);
 
     return () => {
       isMounted = false;
+      window.clearTimeout(timeoutId);
     };
   }, [appSettings.autoCheckUpdates, appSettingsLoaded]);
 
@@ -1285,11 +1292,13 @@ export function AppShell({ children }: PropsWithChildren) {
           )}
         </div>
       ) : null}
-      <SettingsPage
-        isOpen={isSettingsOpen}
-        initialPanel={settingsInitialPanel}
-        onClose={() => setIsSettingsOpen(false)}
-      />
+      {isSettingsOpen ? (
+        <SettingsPage
+          isOpen={isSettingsOpen}
+          initialPanel={settingsInitialPanel}
+          onClose={() => setIsSettingsOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

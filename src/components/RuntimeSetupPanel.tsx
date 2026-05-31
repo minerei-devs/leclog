@@ -25,7 +25,20 @@ interface RuntimeSetupPanelProps {
   className?: string;
 }
 
-const WHISPER_INSTALL_COMMAND = "brew install whisper-cpp";
+const MACOS_WHISPER_INSTALL_COMMAND = "brew install whisper-cpp";
+
+function currentPlatform() {
+  const platform = window.navigator.platform.toLowerCase();
+  const userAgent = window.navigator.userAgent.toLowerCase();
+
+  if (platform.includes("mac") || userAgent.includes("macintosh")) {
+    return "macos";
+  }
+  if (platform.includes("win")) {
+    return "windows";
+  }
+  return "other";
+}
 
 function runtimeSource(path: string | null, binaryName: string) {
   if (!path) {
@@ -86,19 +99,22 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
   useEffect(() => {
     let isMounted = true;
     setIsLoading(true);
-    void refresh()
-      .catch((reason) => {
-        if (isMounted) {
-          setError(getErrorMessage(reason, "Failed to check runtime setup."));
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setIsLoading(false);
-        }
-      });
+    const timeoutId = window.setTimeout(() => {
+      void refresh()
+        .catch((reason) => {
+          if (isMounted) {
+            setError(getErrorMessage(reason, "Failed to check runtime setup."));
+          }
+        })
+        .finally(() => {
+          if (isMounted) {
+            setIsLoading(false);
+          }
+        });
+    }, 600);
     return () => {
       isMounted = false;
+      window.clearTimeout(timeoutId);
     };
   }, [refresh]);
 
@@ -148,14 +164,15 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
 
   async function handleCopyWhisperCommand() {
     try {
-      await navigator.clipboard.writeText(WHISPER_INSTALL_COMMAND);
+      await navigator.clipboard.writeText(MACOS_WHISPER_INSTALL_COMMAND);
       setCopiedCommand(true);
       window.setTimeout(() => setCopiedCommand(false), 1400);
     } catch {
-      setError(`Install command: ${WHISPER_INSTALL_COMMAND}`);
+      setError(`Install command: ${MACOS_WHISPER_INSTALL_COMMAND}`);
     }
   }
 
+  const platform = currentPlatform();
   const missingWhisper = runtimeStatus ? !runtimeStatus.whisperAvailable : false;
   const missingModel = runtimeStatus ? runtimeStatus.installedModelCount === 0 : false;
   const missingFfmpeg = runtimeStatus ? !runtimeStatus.ffmpegAvailable : false;
@@ -290,12 +307,18 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
           {missingWhisper ? (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2">
               <p className="min-w-0 text-xs text-amber-900">
-                whisper-cli is missing from this build. Add the sidecar for release builds, or install the Homebrew fallback for local development.
+                {platform === "macos"
+                  ? "whisper-cli is missing from this build. Add the sidecar for release builds, or install the Homebrew fallback for local development."
+                  : platform === "windows"
+                    ? "whisper-cli is missing from this build. Use Prepare now to download the app-managed runtime, or set LECLOG_WHISPER_PATH to a local whisper-cli.exe."
+                    : "whisper-cli is missing from this build. Use Prepare now to download the app-managed runtime, or set LECLOG_WHISPER_PATH to a local whisper-cli binary."}
               </p>
-              <Button type="button" variant="outline" size="sm" onClick={() => void handleCopyWhisperCommand()}>
-                {copiedCommand ? <CheckCircle2 className="size-3.5" /> : <Copy className="size-3.5" />}
-                {copiedCommand ? "Copied" : WHISPER_INSTALL_COMMAND}
-              </Button>
+              {platform === "macos" ? (
+                <Button type="button" variant="outline" size="sm" onClick={() => void handleCopyWhisperCommand()}>
+                  {copiedCommand ? <CheckCircle2 className="size-3.5" /> : <Copy className="size-3.5" />}
+                  {copiedCommand ? "Copied" : MACOS_WHISPER_INSTALL_COMMAND}
+                </Button>
+              ) : null}
             </div>
           ) : null}
 

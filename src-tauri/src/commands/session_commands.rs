@@ -16,7 +16,7 @@ use crate::{
         ManagedTranscriptionModel, ModelDownloadStatus, PlatformCapabilities,
         ProcessingQualityPreset, ProcessingSettings, ResourceItem, ResourceKind, ResourceOverview,
         RuntimeStatus, SessionExportRequest, SessionExportResult, SessionStatus, SessionSummary,
-        TranscriptPhase, TranscriptSegment, TranscriptionModelInfo,
+        TranscriptPhase, TranscriptSegment, TranscriptionModelInfo, WhisperRuntimePreference,
     },
     state::{
         AudioMeterState, ModelDownloadState, SessionState, SessionStorageSizeState,
@@ -165,6 +165,38 @@ fn session_size_cache_ttl(summary: &SessionSummary) -> Duration {
     STABLE_SESSION_SIZE_CACHE_TTL
 }
 
+fn tracked_session_paths(session: &LectureSession) -> Vec<PathBuf> {
+    let mut paths = HashSet::<PathBuf>::new();
+
+    for path in &session.audio_file_paths {
+        paths.insert(PathBuf::from(path));
+    }
+
+    for path in [
+        session.active_audio_file_path.as_ref(),
+        session.normalized_audio_path.as_ref(),
+        session.processed_transcript_path.as_ref(),
+        session.polished_transcript_path.as_ref(),
+        session.live_preview_audio_path.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        paths.insert(PathBuf::from(path));
+    }
+
+    paths.into_iter().collect()
+}
+
+fn tracked_session_size_bytes(paths: &[PathBuf]) -> u64 {
+    paths
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .fold(0u64, u64::saturating_add)
+}
+
 fn finalize_active_duration(session: &mut LectureSession) -> Result<(), String> {
     let Some(last_resumed_at) = session.last_resumed_at.take() else {
         return Ok(());
@@ -259,8 +291,12 @@ fn auto_download_model_candidate(app: &AppHandle) -> Result<ManagedTranscription
         .ok_or_else(|| String::from("No downloadable transcription model is configured."))
 }
 
-fn ensure_whisper_runtime_ready(app: &AppHandle, task_id: &str) -> Result<(), String> {
-    let whisper_cli_path = storage::resolve_whisper_cli_path(app);
+fn ensure_whisper_runtime_ready(
+    app: &AppHandle,
+    task_id: &str,
+    preference: &WhisperRuntimePreference,
+) -> Result<(), String> {
+    let whisper_cli_path = storage::resolve_whisper_cli_path(app, preference);
     if command_available(&whisper_cli_path, "--help") {
         return Ok(());
     }
@@ -283,29 +319,32 @@ fn ensure_whisper_runtime_ready(app: &AppHandle, task_id: &str) -> Result<(), St
         )
         .ok();
 
-    let path = storage::download_whisper_runtime(app, |downloaded_bytes, total_bytes| {
-        let task_state = app.state::<TranscriptionTaskState>();
-        if task_state.is_canceled(task_id).unwrap_or(false) {
-            return Err(String::from("Task canceled."));
-        }
-        let percent = total_bytes
-            .filter(|total| *total > 0)
-            .map(|total| 2.0 + ((downloaded_bytes as f32 / total as f32) * 10.0).clamp(0.0, 10.0))
-            .unwrap_or(2.0);
-        task_state
-            .progress_task(
-                task_id,
-                "Downloading speech engine",
-                percent,
-                None,
-                None,
-                Some(downloaded_bytes),
-                Some(total_bytes),
-            )
-            .ok();
-        Ok(())
-    })
-    .map_err(|error| format!("Failed to download whisper-cli: {error}"))?;
+    let path =
+        storage::download_whisper_runtime(app, preference, |downloaded_bytes, total_bytes| {
+            let task_state = app.state::<TranscriptionTaskState>();
+            if task_state.is_canceled(task_id).unwrap_or(false) {
+                return Err(String::from("Task canceled."));
+            }
+            let percent = total_bytes
+                .filter(|total| *total > 0)
+                .map(|total| {
+                    2.0 + ((downloaded_bytes as f32 / total as f32) * 10.0).clamp(0.0, 10.0)
+                })
+                .unwrap_or(2.0);
+            task_state
+                .progress_task(
+                    task_id,
+                    "Downloading speech engine",
+                    percent,
+                    None,
+                    None,
+                    Some(downloaded_bytes),
+                    Some(total_bytes),
+                )
+                .ok();
+            Ok(())
+        })
+        .map_err(|error| format!("Failed to download whisper-cli: {error}"))?;
 
     if !command_available(&path, "--help") {
         return Err(String::from(
@@ -444,6 +483,7 @@ fn resolve_processing_settings(
     preferred_model_id: Option<String>,
     preferred_language: Option<String>,
     prompt_terms: Option<String>,
+    whisper_runtime_preference: Option<String>,
     quality_preset: Option<String>,
     chunk_duration_minutes: Option<u32>,
     chunk_overlap_seconds: Option<u32>,
@@ -466,6 +506,11 @@ fn resolve_processing_settings(
     }
     if let Some(prompt_terms) = prompt_terms {
         settings.prompt_terms = prompt_terms;
+    }
+    if let Some(whisper_runtime_preference) = whisper_runtime_preference {
+        if let Ok(parsed) = WhisperRuntimePreference::parse(&whisper_runtime_preference) {
+            settings.whisper_runtime_preference = parsed;
+        }
     }
     if let Some(chunk_duration_minutes) = chunk_duration_minutes {
         settings.chunk_duration_minutes = chunk_duration_minutes;
@@ -536,7 +581,11 @@ pub(crate) fn spawn_final_transcription_job(
                     None,
                 )
                 .ok();
-            ensure_whisper_runtime_ready(&app_handle, &task_id)?;
+            ensure_whisper_runtime_ready(
+                &app_handle,
+                &task_id,
+                &settings.whisper_runtime_preference,
+            )?;
             ensure_transcription_model_ready(&app_handle, &task_id)?;
             task_state
                 .progress_task(&task_id, "Normalizing audio", 18.0, None, None, None, None)
@@ -704,6 +753,7 @@ pub fn create_session(
     preferred_model_id: Option<String>,
     preferred_language: Option<String>,
     prompt_terms: Option<String>,
+    whisper_runtime_preference: Option<String>,
     quality_preset: Option<String>,
     chunk_duration_minutes: Option<u32>,
     chunk_overlap_seconds: Option<u32>,
@@ -719,6 +769,7 @@ pub fn create_session(
         preferred_model_id,
         preferred_language,
         prompt_terms,
+        whisper_runtime_preference,
         quality_preset,
         chunk_duration_minutes,
         chunk_overlap_seconds,
@@ -804,6 +855,7 @@ pub fn import_media_session(
     preferred_model_id: Option<String>,
     preferred_language: Option<String>,
     prompt_terms: Option<String>,
+    whisper_runtime_preference: Option<String>,
     quality_preset: Option<String>,
     chunk_duration_minutes: Option<u32>,
     chunk_overlap_seconds: Option<u32>,
@@ -817,6 +869,7 @@ pub fn import_media_session(
         preferred_model_id,
         preferred_language,
         prompt_terms,
+        whisper_runtime_preference,
         quality_preset,
         chunk_duration_minutes,
         chunk_overlap_seconds,
@@ -902,21 +955,17 @@ pub fn list_session_summaries(
                 (
                     summarize_session(session, Some(&audio_meter)),
                     session.id.clone(),
-                    session.session_dir.clone(),
+                    tracked_session_paths(session),
                 )
             })
             .collect::<Vec<_>>())
     })?;
 
-    for (summary, session_id, session_dir) in &mut summaries {
+    for (summary, session_id, tracked_paths) in &mut summaries {
         let refresh_after = session_size_cache_ttl(summary);
         summary.storage_bytes =
             storage_sizes.get_or_refresh(session_id, &summary.updated_at, refresh_after, || {
-                session_dir
-                    .as_ref()
-                    .map(PathBuf::from)
-                    .map(|path| storage::path_size_bytes(&path).unwrap_or(0))
-                    .unwrap_or(0)
+                tracked_session_size_bytes(tracked_paths)
             })?;
     }
 
@@ -1140,7 +1189,12 @@ pub fn prepare_transcription_runtime(
         let task_state = app_handle.state::<TranscriptionTaskState>();
         let _ = task_state.start_task(&task_id, "Preparing speech engine");
         let outcome = (|| -> Result<(), String> {
-            ensure_whisper_runtime_ready(&app_handle, &task_id)?;
+            let settings = storage::load_processing_settings(&app_handle).unwrap_or_default();
+            ensure_whisper_runtime_ready(
+                &app_handle,
+                &task_id,
+                &settings.whisper_runtime_preference,
+            )?;
             ensure_transcription_model_ready(&app_handle, &task_id)?;
             Ok(())
         })();
@@ -1750,6 +1804,7 @@ pub fn save_session(
     preferred_model_id: Option<String>,
     preferred_language: Option<String>,
     prompt_terms: Option<String>,
+    whisper_runtime_preference: Option<String>,
     quality_preset: Option<String>,
     chunk_duration_minutes: Option<u32>,
     chunk_overlap_seconds: Option<u32>,
@@ -1762,6 +1817,7 @@ pub fn save_session(
         preferred_model_id,
         preferred_language,
         prompt_terms,
+        whisper_runtime_preference,
         quality_preset,
         chunk_duration_minutes,
         chunk_overlap_seconds,
@@ -1868,8 +1924,10 @@ pub fn get_runtime_status(
     let is_app_data_writable = fs::write(&write_probe_path, b"ok")
         .and_then(|_| fs::remove_file(&write_probe_path))
         .is_ok();
+    let settings = storage::load_processing_settings(&app).unwrap_or_default();
     let ffmpeg_path = storage::resolve_ffmpeg_path(&app);
-    let whisper_cli_path = storage::resolve_whisper_cli_path(&app);
+    let whisper_cli_path =
+        storage::resolve_whisper_cli_path(&app, &settings.whisper_runtime_preference);
     let ffmpeg_available = command_available(&ffmpeg_path, "-version");
     let whisper_available = command_available(&whisper_cli_path, "--help");
     let (whisper_acceleration_available, whisper_acceleration_label) =
@@ -2602,6 +2660,7 @@ pub fn patch_processing_settings(
     clear_preferred_model_id: Option<bool>,
     language: Option<String>,
     prompt_terms: Option<String>,
+    whisper_runtime_preference: Option<String>,
     chunk_duration_minutes: Option<u32>,
     chunk_overlap_seconds: Option<u32>,
     whisper_threads: Option<u32>,
@@ -2623,6 +2682,10 @@ pub fn patch_processing_settings(
     }
     if let Some(prompt_terms) = prompt_terms {
         settings.prompt_terms = prompt_terms;
+    }
+    if let Some(whisper_runtime_preference) = whisper_runtime_preference {
+        settings.whisper_runtime_preference =
+            WhisperRuntimePreference::parse(&whisper_runtime_preference)?;
     }
     if let Some(chunk_duration_minutes) = chunk_duration_minutes {
         settings.chunk_duration_minutes = chunk_duration_minutes;
