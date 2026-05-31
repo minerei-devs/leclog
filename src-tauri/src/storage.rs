@@ -8,6 +8,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use reqwest::blocking::Client;
@@ -49,6 +52,8 @@ const WAV_HEADER_LEN: u64 = 44;
 const LIVE_TRANSCRIPT_WINDOW_MS: u64 = 120_000;
 const LIVE_TRANSCRIPT_REFRESH_GRACE_MS: u64 = 2_000;
 const LIVE_TRANSCRIPT_WINDOW_SAMPLE_RATE: u32 = 16_000;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DEFAULT_WHISPER_MODEL_FILE_NAMES: [&str; 8] = [
     "ggml-large-v3-turbo.bin",
     "ggml-small.bin",
@@ -683,7 +688,7 @@ fn command_candidate_available(candidate: &Path, probe_arg: &str) -> bool {
         return false;
     }
 
-    Command::new(candidate)
+    hidden_command(candidate)
         .arg(probe_arg)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -691,6 +696,13 @@ fn command_candidate_available(candidate: &Path, probe_arg: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn hidden_command(program_path: &Path) -> Command {
+    let mut command = Command::new(program_path);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 pub fn resolve_whisper_cli_path(app: &AppHandle, preference: &WhisperRuntimePreference) -> PathBuf {
@@ -905,6 +917,74 @@ fn resolve_whisper_threads(settings: &ProcessingSettings) -> u32 {
         .map(|value| value.get() as u32)
         .unwrap_or(4);
     available.saturating_sub(2).clamp(2, 8)
+}
+
+fn is_large_whisper_model(model_id: Option<&str>) -> bool {
+    model_id
+        .map(|value| value.to_ascii_lowercase().contains("large"))
+        .unwrap_or(false)
+}
+
+fn is_full_large_whisper_model(model_id: Option<&str>) -> bool {
+    model_id
+        .map(|value| {
+            let normalized = value.to_ascii_lowercase();
+            normalized.contains("large") && !normalized.contains("q5_0")
+        })
+        .unwrap_or(false)
+}
+
+fn runtime_prefers_cpu_fallback(app: &AppHandle, preference: &WhisperRuntimePreference) -> bool {
+    match preference {
+        WhisperRuntimePreference::Cpu => true,
+        WhisperRuntimePreference::Gpu => false,
+        WhisperRuntimePreference::Auto => resolve_whisper_cli_path(app, preference)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| !value.to_ascii_lowercase().contains("-gpu-"))
+            .unwrap_or(true),
+    }
+}
+
+fn resolve_transcription_model_for_runtime(
+    app: &AppHandle,
+    settings: &ProcessingSettings,
+) -> Option<String> {
+    let preferred_model_id = resolve_preferred_model_for_settings(app, settings);
+    if runtime_prefers_cpu_fallback(app, &settings.whisper_runtime_preference)
+        && is_full_large_whisper_model(preferred_model_id.as_deref())
+    {
+        return first_existing_model_id(
+            app,
+            &[
+                "ggml-large-v3-turbo-q5_0.bin",
+                "ggml-small.bin",
+                "ggml-base.bin",
+            ],
+        )
+        .or(preferred_model_id);
+    }
+
+    preferred_model_id
+}
+
+fn apply_transcript_chunk_runtime_caps(
+    app: &AppHandle,
+    settings: &mut ProcessingSettings,
+    preferred_model_id: Option<&str>,
+) {
+    if runtime_prefers_cpu_fallback(app, &settings.whisper_runtime_preference) {
+        settings.chunk_duration_minutes = settings.chunk_duration_minutes.min(2);
+        settings.chunk_overlap_seconds = settings.chunk_overlap_seconds.min(10);
+        return;
+    }
+
+    if !is_large_whisper_model(preferred_model_id) {
+        return;
+    }
+
+    settings.chunk_duration_minutes = settings.chunk_duration_minutes.min(5);
+    settings.chunk_overlap_seconds = settings.chunk_overlap_seconds.min(15);
 }
 
 pub fn list_available_transcription_models(
@@ -1232,7 +1312,7 @@ fn run_command_with_optional_task(
     label: &str,
 ) -> Result<()> {
     if task_id.is_none() {
-        let output = Command::new(program_path)
+        let output = hidden_command(program_path)
             .args(args)
             .output()
             .with_context(|| format!("Failed to launch {label} at {}.", program_path.display()))?;
@@ -1255,7 +1335,7 @@ fn run_command_with_optional_task(
             stderr_path.display()
         )
     })?;
-    let mut child = Command::new(program_path)
+    let mut child = hidden_command(program_path)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2562,17 +2642,25 @@ where
         .context("The session is missing a normalized audio file.")?;
     let language = resolve_whisper_language(Some(&settings.language));
     let prompt = resolve_whisper_prompt(Some(&settings.prompt_terms));
-    let preferred_model_id = resolve_preferred_model_for_settings(app, &settings);
+    let preferred_model_id = resolve_transcription_model_for_runtime(app, &settings);
     let whisper_threads = resolve_whisper_threads(&settings);
     let runtime_preference = settings.whisper_runtime_preference.clone();
-    let chunks = split_normalized_audio_for_transcript(app, session, &settings, task_id)?;
+    let mut transcript_settings = settings.clone();
+    apply_transcript_chunk_runtime_caps(
+        app,
+        &mut transcript_settings,
+        preferred_model_id.as_deref(),
+    );
+    let chunks =
+        split_normalized_audio_for_transcript(app, session, &transcript_settings, task_id)?;
     let total_chunks = chunks.len().max(1);
     let mut merged_segments = Vec::new();
     let mut last_end_ms = 0u64;
 
     if chunks.is_empty() {
         let transcript_json_path = transcript_json_path(app, &session.id)?;
-        return transcribe_audio_path(
+        on_chunk_progress(0, total_chunks).map_err(|error| anyhow::anyhow!(error))?;
+        let segments = transcribe_audio_path(
             app,
             &normalized_audio_path,
             &transcript_json_path,
@@ -2584,7 +2672,9 @@ where
             whisper_threads,
             None,
             task_id,
-        );
+        )?;
+        on_chunk_progress(1, total_chunks).map_err(|error| anyhow::anyhow!(error))?;
+        return Ok(segments);
     }
 
     for (index, chunk) in chunks.iter().enumerate() {

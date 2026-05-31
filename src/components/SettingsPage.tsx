@@ -293,9 +293,9 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
   const pendingInitialPanelRef = useRef<SettingsPanelId | null>(null);
   const lastInitialPanelRef = useRef<SettingsPanelId | undefined>(undefined);
 
-  const refreshOverview = useCallback(async () => {
+  const refreshOverview = useCallback(async (forceRuntimeStatus = false) => {
     const [nextRuntimeStatus, nextTasks, nextAppVersion] = await Promise.all([
-      getRuntimeStatus(),
+      getRuntimeStatus({ force: forceRuntimeStatus }),
       listBackgroundTasks(),
       getVersion(),
     ]);
@@ -524,7 +524,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
     setBusyId("runtime");
     try {
       await prepareTranscriptionRuntime();
-      await Promise.all([refreshTasks(), refreshModels(), refreshOverview()]);
+      await Promise.all([refreshTasks(), refreshModels(), refreshOverview(true)]);
       setActivePanel("tasks");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to prepare transcription runtime.");
@@ -700,7 +700,7 @@ export function SettingsPage({ isOpen, initialPanel, onClose }: SettingsPageProp
 
   function handleRefreshCurrentPanel() {
     if (activePanel === "overview") {
-      void refreshOverview();
+      void refreshOverview(true);
       return;
     }
     void refreshPanel(activePanel);

@@ -2,9 +2,13 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::Duration,
+    process::{Child, Command, ExitStatus, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use chrono::{DateTime, Utc};
 use tauri::{AppHandle, Manager, State};
@@ -28,9 +32,51 @@ use crate::{
 
 const ACTIVE_SESSION_SIZE_CACHE_TTL: Duration = Duration::from_secs(30);
 const STABLE_SESSION_SIZE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const COMMAND_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn hidden_command(program_path: &Path) -> Command {
+    let mut command = Command::new(program_path);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+fn wait_for_probe_status(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if started_at.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(_) => return None,
+        }
+    }
+}
+
+fn wait_for_probe_output(mut child: Child, timeout: Duration) -> Option<Output> {
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if started_at.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(_) => return None,
+        }
+    }
 }
 
 #[tauri::command]
@@ -612,11 +658,21 @@ pub(crate) fn spawn_final_transcription_job(
                     let percent = if total == 0 {
                         20.0
                     } else {
-                        20.0 + ((completed as f32 / total as f32) * 68.0)
+                        let effective_completed = if completed == 0 {
+                            0.15
+                        } else {
+                            completed as f32
+                        };
+                        20.0 + ((effective_completed / total as f32) * 68.0)
+                    };
+                    let stage = if total <= 1 {
+                        "Transcribing audio"
+                    } else {
+                        "Transcribing chunks"
                     };
                     app_handle.state::<TranscriptionTaskState>().progress_task(
                         &task_id,
-                        "Transcribing chunks",
+                        stage,
                         percent,
                         Some(completed as u32),
                         Some(total as u32),
@@ -1855,12 +1911,17 @@ pub fn save_session(
 }
 
 fn command_available(path: &Path, help_arg: &str) -> bool {
-    Command::new(path)
+    let Ok(mut child) = hidden_command(path)
         .arg(help_arg)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .spawn()
+    else {
+        return false;
+    };
+
+    wait_for_probe_status(&mut child, COMMAND_PROBE_TIMEOUT)
         .map(|status| status.success())
         .unwrap_or(false)
 }
@@ -1898,10 +1959,17 @@ fn detect_whisper_acceleration(path: &Path, whisper_available: bool) -> (bool, O
         return (false, None);
     }
 
-    Command::new(path)
+    let Ok(child) = hidden_command(path)
         .arg("--help")
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        return (false, Some(String::from("Unknown")));
+    };
+
+    wait_for_probe_output(child, COMMAND_PROBE_TIMEOUT)
         .map(|output| {
             let mut log = String::from_utf8_lossy(&output.stdout).into_owned();
             log.push('\n');

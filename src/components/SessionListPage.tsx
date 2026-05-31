@@ -353,7 +353,15 @@ export function SessionListPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void listSessionSummaries().then(setSessions).catch(() => {});
+    function refreshSessions() {
+      void listSessionSummaries().then(setSessions).catch(() => {});
+    }
+
+    refreshSessions();
+    window.addEventListener("leclog:sessions-changed", refreshSessions);
+    return () => {
+      window.removeEventListener("leclog:sessions-changed", refreshSessions);
+    };
   }, []);
 
   useEffect(() => {

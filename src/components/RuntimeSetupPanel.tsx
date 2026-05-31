@@ -86,9 +86,9 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
   const [copiedCommand, setCopiedCommand] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     const [nextRuntimeStatus, nextModels] = await Promise.all([
-      getRuntimeStatus(),
+      getRuntimeStatus({ force }),
       listAvailableTranscriptionModels(),
     ]);
     setRuntimeStatus(nextRuntimeStatus);
@@ -139,7 +139,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
     setError(null);
     try {
       await downloadTranscriptionModel(model.id);
-      await refresh();
+      await refresh(true);
       openSettingsPanel("tasks");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Failed to start model download.");
@@ -153,7 +153,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
     setError(null);
     try {
       await prepareTranscriptionRuntime();
-      await refresh();
+      await refresh(true);
       openSettingsPanel("tasks");
     } catch (reason) {
       setError(getErrorMessage(reason, "Failed to prepare transcription runtime."));
@@ -217,7 +217,7 @@ export function RuntimeSetupPanel({ showWhenReady = false, className = "" }: Run
               {isPreparing ? "Preparing" : "Prepare now"}
             </Button>
           ) : null}
-          <Button type="button" variant="outline" size="sm" onClick={() => void refresh()}>
+          <Button type="button" variant="outline" size="sm" onClick={() => void refresh(true)}>
             <RefreshCw className="size-3.5" />
             Check
           </Button>
