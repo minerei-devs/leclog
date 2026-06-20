@@ -464,15 +464,34 @@ jobs:
 
           $bundleDir = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
           $windowsManifest = Join-Path $bundleDir "latest.json"
-          if (-not (Test-Path $windowsManifest)) {
-            throw "Windows updater manifest was not generated at $windowsManifest."
-          }
-
           $installer = Get-ChildItem -Path $bundleDir -File -Filter "*.exe" |
             Sort-Object Name |
             Select-Object -First 1
           if (-not $installer) {
             throw "Windows NSIS installer was not found in $bundleDir."
+          }
+          $signaturePath = "$($installer.FullName).sig"
+          if (-not (Test-Path $signaturePath)) {
+            throw "Windows updater signature was not generated at $signaturePath."
+          }
+
+          if (-not (Test-Path $windowsManifest)) {
+            $tagVersion = $env:RELEASE_TAG -replace "^v", ""
+            $signature = (Get-Content -Raw -Path $signaturePath).Trim()
+            $fallbackManifest = @{
+              version = $tagVersion
+              notes = ""
+              pub_date = (Get-Date).ToUniversalTime().ToString("o")
+              platforms = @{
+                "windows-x86_64" = @{
+                  signature = $signature
+                  url = $installer.Name
+                }
+              }
+            }
+            $fallbackManifest |
+              ConvertTo-Json -Depth 10 |
+              Set-Content -Path $windowsManifest
           }
 
           $manifestDir = Join-Path $env:RUNNER_TEMP "windows-updater-manifest"
