@@ -41,10 +41,16 @@ fn now_iso() -> String {
 }
 
 fn hidden_command(program_path: &Path) -> Command {
-    let mut command = Command::new(program_path);
     #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
+    {
+        let mut command = Command::new(program_path);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program_path)
+    }
 }
 
 fn wait_for_probe_status(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
@@ -2589,14 +2595,14 @@ pub fn reveal_resource(app: AppHandle, path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
+        hidden_command(Path::new("open"))
             .args(["-R", path.to_string_lossy().as_ref()])
             .status()
             .map_err(|error| format!("Failed to reveal resource in Finder: {error}"))?;
     }
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer")
+        hidden_command(Path::new("explorer"))
             .arg(format!("/select,{}", path.display()))
             .status()
             .map_err(|error| format!("Failed to reveal resource in Explorer: {error}"))?;
@@ -2608,7 +2614,7 @@ pub fn reveal_resource(app: AppHandle, path: String) -> Result<(), String> {
         } else {
             path.parent().map(Path::to_path_buf).unwrap_or(path)
         };
-        Command::new("xdg-open")
+        hidden_command(Path::new("xdg-open"))
             .arg(target)
             .status()
             .map_err(|error| format!("Failed to reveal resource: {error}"))?;

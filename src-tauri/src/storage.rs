@@ -699,13 +699,20 @@ fn command_candidate_available(candidate: &Path, probe_arg: &str) -> bool {
 }
 
 fn hidden_command(program_path: &Path) -> Command {
-    let mut command = Command::new(program_path);
     #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
+    {
+        let mut command = Command::new(program_path);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program_path)
+    }
 }
 
 pub fn resolve_whisper_cli_path(app: &AppHandle, preference: &WhisperRuntimePreference) -> PathBuf {
+    let mut candidates = Vec::new();
     let variant_env = match preference {
         WhisperRuntimePreference::Gpu => Some("LECLOG_WHISPER_GPU_PATH"),
         WhisperRuntimePreference::Cpu => Some("LECLOG_WHISPER_CPU_PATH"),
@@ -713,62 +720,54 @@ pub fn resolve_whisper_cli_path(app: &AppHandle, preference: &WhisperRuntimePref
     };
     if let Some(key) = variant_env {
         if let Ok(path) = env::var(key) {
-            let candidate = PathBuf::from(path);
-            if candidate.exists() {
-                return candidate;
-            }
+            candidates.push(PathBuf::from(path));
         }
     }
 
     if let Ok(path) = env::var("LECLOG_WHISPER_PATH") {
-        let candidate = PathBuf::from(path);
-        if candidate.exists() {
-            return candidate;
-        }
+        candidates.push(PathBuf::from(path));
     }
 
     let candidate_file_names = whisper_runtime_candidate_file_names(preference);
     if let Ok(runtime_dir) = app_runtime_dir(app) {
         for file_name in &candidate_file_names {
-            let candidate = runtime_dir.join(file_name);
-            if candidate.exists() {
-                return candidate;
-            }
+            candidates.push(runtime_dir.join(file_name));
         }
     }
 
     for file_name in &candidate_file_names {
-        let local_sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries")
-            .join(file_name);
-        if local_sidecar.exists() {
-            return local_sidecar;
-        }
+        candidates.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join(file_name),
+        );
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
         for file_name in &candidate_file_names {
-            for candidate in [
+            candidates.extend([
                 resource_dir.join(file_name),
                 resource_dir.join("binaries").join(file_name),
-            ] {
-                if candidate.exists() {
-                    return candidate;
-                }
-            }
+            ]);
         }
     }
 
-    for candidate in [
+    candidates.extend([
         PathBuf::from("/opt/homebrew/bin/whisper-cli"),
         PathBuf::from("/usr/local/bin/whisper-cli"),
-    ] {
-        if candidate.exists() {
-            return candidate;
-        }
-    }
+        PathBuf::from("whisper-cli"),
+    ]);
 
-    PathBuf::from("whisper-cli")
+    let fallback = candidates
+        .iter()
+        .find(|candidate| candidate.components().count() == 1 || candidate.exists())
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("whisper-cli"));
+
+    candidates
+        .into_iter()
+        .find(|candidate| command_candidate_available(candidate, "--help"))
+        .unwrap_or(fallback)
 }
 
 fn resolve_whisper_model_path(
